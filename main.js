@@ -633,13 +633,8 @@ let saveTimeout = null;
 let suppressNextUpdate = false;
 
 function debouncedSave() {
-  if (!syncEnabled || suppressNextUpdate) return;
-  clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(() => {
-    const code = getAllCode();
-    import.meta.hot?.send('strudel:save', { code });
-    localStorage.setItem('strudel_code', code);
-  }, 500);
+  // Only save to localStorage for session recovery, not to disk
+  localStorage.setItem('strudel_code', getAllCode());
 }
 
 /* ── Secondary editor highlight decorations ────────────── */
