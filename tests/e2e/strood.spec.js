@@ -13,6 +13,7 @@ test('exposes the core live-coding workflow without hidden shortcuts', async ({ 
   await expect(page.getByRole('textbox', { name: 'Song code' })).toBeVisible();
   await expect(page.locator('#track-region')).toHaveCount(0);
   await expect(page.getByRole('combobox', { name: 'Solo track' })).toBeVisible();
+  await expect(page.locator('.cm-smart-number[data-smart-name="cycles"]')).toHaveCount(7);
   await expect.poll(() => page.evaluate(() =>
     (localStorage.getItem('strudel_code')?.match(/mute: false/g) || []).length)).toBe(8);
 });

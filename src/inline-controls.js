@@ -23,6 +23,7 @@ const CALL_PARAMETERS = {
 const PROPERTY_PARAMETERS = {
   gain: CALL_PARAMETERS.gain,
   pan: CALL_PARAMETERS.pan,
+  cycles: { min: 1, max: 64, step: 1, drag: 0.08 },
 };
 
 const SOUND_CHOICES = [

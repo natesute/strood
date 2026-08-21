@@ -6,10 +6,23 @@ import { findInlineControls, formatInlineNumber } from '../src/inline-controls.j
 import { insertPatchMacro, listPatchMacros } from '../synth-modules/macros.mjs';
 
 describe('performance metadata', () => {
-  it('parses a looping section map and resolves its current section', () => {
-    const sections = parseSections('// @section Intro | 0-4\n// @section Hook | 4-8');
+  it('turns an arrangement into a looping section map', () => {
+    const sections = parseSections(`const arrangement = [
+      { section: 'Intro', cycles: 4 },
+      { section: 'Hook', cycles: 4 },
+    ]`);
+    expect(sections).toEqual([
+      { name: 'Intro', start: 0, end: 4 },
+      { name: 'Hook', start: 4, end: 8 },
+    ]);
     expect(sectionAtCycle(sections, 5).name).toBe('Hook');
     expect(sectionAtCycle(sections, 9).name).toBe('Intro');
+  });
+
+  it('still opens songs that use legacy section comments', () => {
+    expect(parseSections('// @section Intro | 0-4')).toEqual([
+      { name: 'Intro', start: 0, end: 4 },
+    ]);
   });
 
   it('calculates the next cycle boundary', () => {
@@ -60,6 +73,13 @@ const settings = { gain: 1.05, pan: .4, mute: false }`;
       .toEqual(['solo', 'sound', 'color']);
     expect(controls.find(({ name }) => name === 'solo').options).toEqual(['all', 'lead']);
     expect(controls.find(({ type }) => type === 'boolean')).toMatchObject({ name: 'mute', value: 'false' });
+  });
+
+  it('makes arrangement durations draggable', () => {
+    const controls = findInlineControls("const arrangement = [{ section: 'Intro', cycles: 8 }]");
+    expect(controls).toContainEqual(expect.objectContaining({
+      type: 'number', name: 'cycles', value: '8', min: 1, max: 64, step: 1,
+    }));
   });
 
   it('preserves compact decimal style while scrubbing', () => {

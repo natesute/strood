@@ -1,12 +1,16 @@
 setcpm(95/4)
 
-// @section Intro | 0-8
-// @section Verse 1 | 8-24
-// @section Lift | 24-32
-// @section Hook | 32-48
-// @section Breakdown | 48-52
-// @section Final hook | 52-60
-// @section Outro | 60-64
+const arrangement = [
+  { section: 'Intro', cycles: 8 },
+  { section: 'Verse 1', cycles: 16 },
+  { section: 'Lift', cycles: 8 },
+  { section: 'Hook', cycles: 16 },
+  { section: 'Breakdown', cycles: 4 },
+  { section: 'Final hook', cycles: 8 },
+  { section: 'Outro', cycles: 4 },
+]
+const [introCycles, verseCycles, liftCycles, hookCycles, breakdownCycles, finalHookCycles, outroCycles] =
+  arrangement.map(({ cycles }) => cycles)
 
 // Mastering: drag underlined values, use arrows for lists, or click mute values.
 const master = .9
@@ -61,8 +65,8 @@ const hatsPhrase = s("hh*8").bank("RolandTR909").gain("[.16 .24]*4").clip(sine.r
 // @track vocal | Vocal
 vocal$: mix('vocal',
   arrange(
-    [8, silence], [16, vocalPhrase.velocity(.72)], [8, vocalPhrase.velocity(.84)],
-    [16, vocalPhrase], [4, silence], [8, vocalPhrase], [4, silence]
+    [introCycles, silence], [verseCycles, vocalPhrase.velocity(.72)], [liftCycles, vocalPhrase.velocity(.84)],
+    [hookCycles, vocalPhrase], [breakdownCycles, silence], [finalHookCycles, vocalPhrase], [outroCycles, silence]
   ).orbit(1).color("#ff8844")._spiral({ stretch: .5, size: 100, thickness: 24, steady: 0, fade: .001, colorizeInactive: 0 }),
   vocalMix
 )
@@ -70,9 +74,10 @@ vocal$: mix('vocal',
 // @track bass | Bass
 bass$: mix('bass',
   arrange(
-    [4, silence], [4, bassPhrase.velocity(.5)], [16, bassPhrase.velocity(.78)],
-    [8, bassPhrase.velocity(.9)], [16, bassPhrase], [4, silence],
-    [8, bassPhrase], [4, bassPhrase.velocity(.5)]
+    [introCycles / 2, silence], [introCycles / 2, bassPhrase.velocity(.5)],
+    [verseCycles, bassPhrase.velocity(.78)], [liftCycles, bassPhrase.velocity(.9)],
+    [hookCycles, bassPhrase], [breakdownCycles, silence],
+    [finalHookCycles, bassPhrase], [outroCycles, bassPhrase.velocity(.5)]
   ).orbit(2).color("dodgerblue")._scope(),
   bassMix
 )
@@ -80,9 +85,9 @@ bass$: mix('bass',
 // @track organ | Organ
 organ$: mix('organ',
   arrange(
-    [8, organPhrase.lpf(650).velocity(.55)], [16, organPhrase.velocity(.68)],
-    [8, organPhrase.velocity(.82)], [16, organPhrase], [4, silence],
-    [8, organPhrase], [4, organPhrase.lpf(650).velocity(.48)]
+    [introCycles, organPhrase.lpf(650).velocity(.55)], [verseCycles, organPhrase.velocity(.68)],
+    [liftCycles, organPhrase.velocity(.82)], [hookCycles, organPhrase], [breakdownCycles, silence],
+    [finalHookCycles, organPhrase], [outroCycles, organPhrase.lpf(650).velocity(.48)]
   ).orbit(3).color("magenta")._lissajous({ size: 150 }),
   organMix
 )
@@ -90,8 +95,9 @@ organ$: mix('organ',
 // @track stabs | Piano stabs
 stabs$: mix('stabs',
   arrange(
-    [24, silence], [8, stabsPhrase.velocity(.72)], [16, stabsPhrase],
-    [4, silence], [8, stabsPhrase.velocity(.9)], [4, silence]
+    [introCycles + verseCycles, silence], [liftCycles, stabsPhrase.velocity(.72)],
+    [hookCycles, stabsPhrase], [breakdownCycles, silence],
+    [finalHookCycles, stabsPhrase.velocity(.9)], [outroCycles, silence]
   ).orbit(4).color("cyan"),
   stabsMix
 )
@@ -99,8 +105,10 @@ stabs$: mix('stabs',
 // @track runs | Piano runs
 runs$: mix('runs',
   arrange(
-    [31, silence], [1, runFill], [15, silence], [1, runFill],
-    [11, silence], [1, runFill], [4, silence]
+    [introCycles + verseCycles + liftCycles - 1, silence], [1, runFill],
+    [hookCycles - 1, silence], [1, runFill],
+    [breakdownCycles + finalHookCycles - 1, silence], [1, runFill],
+    [outroCycles, silence]
   ).orbit(5).color("white"),
   runsMix
 )
@@ -108,9 +116,10 @@ runs$: mix('runs',
 // @track kick | Kick
 kick$: mix('kick',
   arrange(
-    [8, kickPhrase.velocity(.55)], [16, kickPhrase.velocity(.76)],
-    [8, kickPhrase.velocity(.9)], [16, kickPhrase], [4, kickPhrase.fast(2).velocity(.52)],
-    [8, kickPhrase], [4, silence]
+    [introCycles, kickPhrase.velocity(.55)], [verseCycles, kickPhrase.velocity(.76)],
+    [liftCycles, kickPhrase.velocity(.9)], [hookCycles, kickPhrase],
+    [breakdownCycles, kickPhrase.fast(2).velocity(.52)],
+    [finalHookCycles, kickPhrase], [outroCycles, silence]
   ).orbit(6).color("red")._orbit({ size: 130 }),
   kickMix
 )
@@ -118,8 +127,9 @@ kick$: mix('kick',
 // @track snare | Snare
 snare$: mix('snare',
   arrange(
-    [8, silence], [16, snarePhrase.velocity(.76)], [8, snarePhrase.velocity(.9)],
-    [16, snarePhrase], [4, snarePhrase.velocity(.55)], [8, snarePhrase], [4, silence]
+    [introCycles, silence], [verseCycles, snarePhrase.velocity(.76)],
+    [liftCycles, snarePhrase.velocity(.9)], [hookCycles, snarePhrase],
+    [breakdownCycles, snarePhrase.velocity(.55)], [finalHookCycles, snarePhrase], [outroCycles, silence]
   ).orbit(7).color("yellow"),
   snareMix
 )
@@ -127,9 +137,10 @@ snare$: mix('snare',
 // @track hats | Hats
 hats$: mix('hats',
   arrange(
-    [8, hatsPhrase.velocity(.45)], [16, hatsPhrase.velocity(.72)],
-    [8, hatsPhrase.velocity(.9)], [16, hatsPhrase], [4, hatsPhrase.slow(2).velocity(.42)],
-    [8, hatsPhrase], [4, silence]
+    [introCycles, hatsPhrase.velocity(.45)], [verseCycles, hatsPhrase.velocity(.72)],
+    [liftCycles, hatsPhrase.velocity(.9)], [hookCycles, hatsPhrase],
+    [breakdownCycles, hatsPhrase.slow(2).velocity(.42)],
+    [finalHookCycles, hatsPhrase], [outroCycles, silence]
   ).orbit(8).color("lime"),
   hatsMix
 )
