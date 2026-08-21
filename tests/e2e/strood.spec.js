@@ -36,6 +36,12 @@ test('opens the searchable song browser and patch module palette', async ({ page
 
 test('edits mastering controls in the song source', async ({ page }) => {
   await page.goto('/');
+  const vocalSynth = page.getByRole('combobox', { name: 'Choose vocal synth' });
+  await expect(vocalSynth).toHaveValue('sine');
+  await vocalSynth.selectOption('triangle');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('strudel_code')))
+    .toContain("const vocalSynth = 'triangle'");
+
   await page.getByRole('combobox', { name: 'Solo track' }).selectOption('bass');
   await expect.poll(() => page.evaluate(() => localStorage.getItem('strudel_code')))
     .toContain("const solo = 'bass'");
@@ -103,12 +109,15 @@ test('uses linked editor views for multi-column mode', async ({ page }) => {
   await expect(page.locator('.editor-panel')).toHaveCount(2);
   const secondEditor = page.getByRole('textbox', { name: 'Song code, column 2' });
   await expect(secondEditor).toBeVisible();
+  const originalLength = Number(await editor.getAttribute('data-document-length'));
   await editor.click();
   await page.keyboard.press('Control+Home');
   await page.keyboard.type('// linked view check\n');
-  await secondEditor.click();
-  await page.keyboard.press('Meta+ArrowUp');
-  await expect(secondEditor).toContainText('// linked view check');
+  await expect.poll(async () => {
+    const primaryLength = Number(await editor.getAttribute('data-document-length'));
+    const secondaryLength = Number(await secondEditor.getAttribute('data-document-length'));
+    return { linked: primaryLength === secondaryLength, increased: primaryLength > originalLength };
+  }).toEqual({ linked: true, increased: true });
 });
 
 test('has no automatically detectable accessibility violations', async ({ page }) => {

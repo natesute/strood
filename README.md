@@ -15,7 +15,7 @@ Open [http://localhost:5173](http://localhost:5173).
 ## Working with songs
 
 - Press `Ctrl/⌘ + Enter` to run the whole song, `Shift + Enter` to run the current line and `Ctrl/⌘ + .` to stop.
-- Master tracks in the song source. Drag underlined numbers, use the small arrows beside finite choices and click highlighted booleans; every interaction rewrites the visible code.
+- Master tracks in the song source. Drag underlined numbers, click quoted values to choose from a list and click highlighted booleans; every interaction rewrites the visible code.
 - Add editor columns with `Ctrl/⌘ + Shift + →`. Every column is a linked view of the same document, so edits remain synchronised.
 - Save and open songs from the transport bar. The song browser supports search, rename, duplicate, version history and recoverable deletion.
 - Strood keeps local recovery snapshots after edits and before risky operations. They appear alongside saved history when you open a song's History view.

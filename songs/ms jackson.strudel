@@ -1,8 +1,9 @@
 setcpm(95/4)
 
-// Mastering: drag underlined values, use arrows for lists, or click mute values.
+// Live controls: drag underlined numbers; click quoted choices or mute values.
 const master = .9
 const solo = 'all'
+const vocalSynth = 'sine'
 const vocalMix = { gain: 1.08, pan: .5, mute: false }
 const bassMix = { gain: 1, pan: .5, mute: false }
 const organMix = { gain: .82, pan: null, mute: false }
@@ -18,7 +19,7 @@ const mix = (name, pattern, { gain = 1, pan = null, mute = false } = {}) => {
 }
 
 const vocalPhrase = note("<[~ ~ ~ a4 e5 d5 d5 d5 ~ e5 ~ ~ a5@4] [e5 ~ e5 ~ e5 ~ g5@3 f5 e5 ~ ~ ~ ~ ~] [d5 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~] [a4 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~]>")
-  .sound("vox").gain(.62).release(.8).lpf(2400).room(.32).size(3).delay(".22:.15:.28")
+  .sound(vocalSynth).gain(.62).release(.8).lpf(2400).room(.32).size(3).delay(".22:.15:.28")
 
 const bassPhrase = stack(
   note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a2 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")

@@ -62,6 +62,21 @@ export function findInlineControls(code) {
     addNumberControl(controls, match, 'master', match[1], offset, CALL_PARAMETERS.gain);
   }
 
+  const namedSounds = /\bconst\s+([A-Za-z_$][A-Za-z0-9_$]*(?:Synth|Sound))\s*=\s*(["'])([A-Za-z0-9_-]+)\2/g;
+  for (const match of code.matchAll(namedSounds)) {
+    const quoted = `${match[2]}${match[3]}${match[2]}`;
+    const from = match.index + match[0].lastIndexOf(quoted);
+    controls.push({
+      type: 'choice',
+      name: match[1],
+      value: match[3],
+      quote: match[2],
+      from,
+      to: from + quoted.length,
+      options: SOUND_CHOICES,
+    });
+  }
+
   const choices = /\.(sound|color)\(\s*(["'])([A-Za-z0-9_-]+)\2\s*\)/g;
   for (const match of code.matchAll(choices)) {
     const quoted = `${match[2]}${match[3]}${match[2]}`;
@@ -109,6 +124,10 @@ function announceCommit(view) {
   view.dom.dispatchEvent(new CustomEvent('strood:inline-control-commit', { bubbles: true }));
 }
 
+function readableName(name) {
+  return name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[-_]+/g, ' ').toLowerCase();
+}
+
 class ChoiceWidget extends WidgetType {
   constructor(control) {
     super();
@@ -117,18 +136,22 @@ class ChoiceWidget extends WidgetType {
 
   eq(other) {
     return this.from === other.from && this.to === other.to && this.value === other.value
-      && this.name === other.name && this.options.join('|') === other.options.join('|');
+      && this.name === other.name && this.quote === other.quote
+      && this.options.join('|') === other.options.join('|');
   }
 
   toDOM(view) {
     const select = document.createElement('select');
     select.className = 'cm-inline-choice';
-    select.setAttribute('aria-label', this.name === 'solo' ? 'Solo track' : `Choose ${this.name}`);
-    select.title = `Choose ${this.name}`;
+    select.dataset.smartName = this.name;
+    select.style.setProperty('--choice-width', `${Math.max(6, this.value.length + 4)}ch`);
+    const label = this.name === 'solo' ? 'Solo track' : `Choose ${readableName(this.name)}`;
+    select.setAttribute('aria-label', label);
+    select.title = label;
     for (const option of uniqueOptions(this.value, this.options)) {
       const element = document.createElement('option');
       element.value = option;
-      element.textContent = option;
+      element.textContent = `${this.quote}${option}${this.quote}`;
       element.selected = option === this.value;
       select.appendChild(element);
     }
@@ -149,7 +172,7 @@ function buildDecorations(state) {
   const controls = findInlineControls(state.doc.toString());
   const ranges = controls.map((control) => {
     if (control.type === 'choice') {
-      return Decoration.widget({ widget: new ChoiceWidget(control), side: 1 }).range(control.to);
+      return Decoration.replace({ widget: new ChoiceWidget(control) }).range(control.from, control.to);
     }
     if (control.type === 'boolean') {
       const muted = control.name === 'mute' && control.value === 'true';

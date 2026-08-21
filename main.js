@@ -487,6 +487,10 @@ function allEditorViews() {
   return [editor.editor, ...secondaryEditors.map((entry) => entry.view)];
 }
 
+function stampDocumentLength(view) {
+  view.contentDOM.dataset.documentLength = String(view.state.doc.length);
+}
+
 function syncDocumentChanges(sourceView, transactions) {
   if (syncingEditors) return;
   const changed = transactions.filter((transaction) => transaction.docChanged);
@@ -500,6 +504,7 @@ function syncDocumentChanges(sourceView, transactions) {
       }
     }
   } finally {
+    allEditorViews().forEach(stampDocumentLength);
     syncingEditors = false;
   }
 }
@@ -542,6 +547,7 @@ function createSecondaryEditor(initialCode = editor.code, columnIndex = 1) {
       compartments.isLineWrappingEnabled.reconfigure(extensions.isLineWrappingEnabled(wrapEnabled)),
     ],
   });
+  stampDocumentLength(view);
 
   view.dom.addEventListener('keydown', onEditorKeydown, { capture: true });
   view.contentDOM.setAttribute('aria-label', `Song code, column ${columnIndex + 1}`);
@@ -1462,6 +1468,7 @@ function closeSongBrowser() {
 editor.editor.dom.addEventListener('keydown', onEditorKeydown, { capture: true });
 editor.editor.contentDOM.setAttribute('aria-label', 'Song code');
 editor.editor.scrollDOM.tabIndex = 0;
+stampDocumentLength(editor.editor);
 editorsContainer.addEventListener('strood:inline-control-commit', () => {
   if (isPlaying) evaluateAll().catch(() => {});
 });

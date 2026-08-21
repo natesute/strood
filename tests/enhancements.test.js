@@ -82,6 +82,13 @@ const settings = { gain: 1.05, pan: .4, mute: false }`;
     }));
   });
 
+  it('finds a named synth choice in ordinary source code', () => {
+    const controls = findInlineControls("const vocalSynth = 'vox'\nnote('c4').sound(vocalSynth)");
+    expect(controls).toContainEqual(expect.objectContaining({
+      type: 'choice', name: 'vocalSynth', value: 'vox', options: expect.arrayContaining(['vox', 'sine']),
+    }));
+  });
+
   it('preserves compact decimal style while scrubbing', () => {
     expect(formatInlineNumber(0.75, 0.01, '.8')).toBe('.75');
     expect(formatInlineNumber(1, 0.01, '.8')).toBe('1');
