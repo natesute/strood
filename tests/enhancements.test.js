@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { effectiveTrackGains } from '../src/mixer-state.js';
 import { parseSections, sectionAtCycle, nextCycleTiming } from '../src/song-metadata.js';
 import { requiredSamplePacks } from '../src/sample-loader.js';
+import { needsModularSynth, referencedPatchSounds } from '../src/optional-systems.js';
 import { insertPatchMacro, listPatchMacros } from '../synth-modules/macros.mjs';
 
 describe('performance metadata', () => {
@@ -28,6 +29,12 @@ describe('runtime mixer', () => {
 });
 
 describe('lazy assets and reusable patch subgraphs', () => {
+  it('loads only the modular patches referenced by a song', () => {
+    const code = 'note("c4").sound("vox")\nnote("c2").sound("acid")\nnote("e4").sound("vox")';
+    expect(referencedPatchSounds(code)).toEqual(['vox', 'acid']);
+    expect(needsModularSynth('note("c4").sound("sine")')).toBe(false);
+  });
+
   it('loads only packs referenced by the song', () => {
     expect(requiredSamplePacks('note("c4").sound("sawtooth")')).toEqual([]);
     expect(requiredSamplePacks('s("bd").bank("RolandTR909")\nnote("c4").sound("piano")')).toEqual(['piano', 'drums']);

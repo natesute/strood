@@ -1,5 +1,7 @@
 // Patch Editor — free-form node graph with draggable modules and visual wiring
-import { registerPatch, listModules, getModuleFactory, listPatchMacros, insertPatchMacro } from './synth-modules/index.mjs';
+import './patch-editor.css';
+import { registerPatch, listModules, getModuleFactory } from './synth-modules/index.mjs';
+import { listPatchMacros, insertPatchMacro } from './synth-modules/macros.mjs';
 import { superdough, getAudioContext } from 'superdough';
 import { listPatches, readPatch, writePatch } from './src/api.js';
 import { showToast, trapFocus } from './src/ui.js';

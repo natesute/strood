@@ -63,9 +63,8 @@ export function parseTracks(code) {
   });
 }
 
-export function routeTracksForPlayback(code) {
+export function routeTracksForPlayback(code, tracks = parseTracks(code)) {
   let routed = code;
-  const tracks = parseTracks(code);
   for (const track of [...tracks].reverse()) {
     const original = routed.slice(track.start, track.end);
     if (/\.orbit\(\s*\d+\s*\)/.test(original)) continue;

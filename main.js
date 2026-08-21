@@ -2,7 +2,7 @@ import { StrudelMirror, initEditor, compartments, extensions } from '@strudel/co
 import {
   getAudioContext,
   webaudioOutput,
-  initAudioOnFirstClick,
+  initAudio,
   registerSynthSounds,
   samples,
 } from '@strudel/webaudio';
@@ -51,6 +51,12 @@ const mixer = new RuntimeMixer();
 let currentSections = [];
 let queuedUpdateTimer = 0;
 let queuedTargetCycle = null;
+let audioReadyPromise = null;
+
+function ensureAudioReady() {
+  audioReadyPromise ||= initAudio();
+  return audioReadyPromise;
+}
 
 let _saveTimer = 0;
 function debouncedSave() {
@@ -83,6 +89,8 @@ const secHighlightField = StateField.define({
 /* ── Note onset flash (white outline on first frame) ────── */
 const activeHapIds = new Set();
 const onsetTimestamps = new Map(); // uid -> performance.now() when onset detected
+const currentHapIds = new Set();
+const currentRippleIds = new Set();
 const ONSET_FLASH_MS = 50;
 
 /* ── Dirty-line tracking ────────────────────────────────── */
@@ -221,7 +229,6 @@ function updateDirtyCount() {
 
 /* ── Prebake ────────────────────────────────────────────── */
 async function prebake() {
-  initAudioOnFirstClick();
   bootStatusEl.textContent = 'Preparing audio engine…';
   await evalScope(
     evalScope,
@@ -232,10 +239,12 @@ async function prebake() {
     import('@strudel/webaudio'),
   );
   await registerSynthSounds();
-  await prepareOptionalSystems(getAllCode());
   ensureMasterEngine();
   bootStatusEl.textContent = 'Synths ready · loading required samples…';
-  const result = await loadSamplePacks(getAllCode(), samples);
+  const [, result] = await Promise.all([
+    prepareOptionalSystems(getAllCode()),
+    loadSamplePacks(getAllCode(), samples),
+  ]);
   bootStatusEl.textContent = result.failed
     ? `Audio ready · ${result.failed} sample pack${result.failed === 1 ? '' : 's'} unavailable`
     : 'Audio ready';
@@ -317,40 +326,31 @@ const customHighlight = HighlightStyle.define([
   { tag: t.invalid,                            color: '#ff3333' },
 ]);
 
-editor.editor.dispatch({
-  effects: StateEffect.appendConfig.of([
-    customThemeColors,
-    Prec.highest(syntaxHighlighting(customHighlight)),
-  ]),
+let wrapEnabled = true;
+const cursorStatusListener = EditorView.updateListener.of((viewUpdate) => {
+  const position = viewUpdate.state.selection.main.head;
+  const line = viewUpdate.state.doc.lineAt(position);
+  infoEl.textContent = `${line.number}:${position - line.from + 1}`;
+});
+const documentChangeListener = EditorView.updateListener.of((viewUpdate) => {
+  if (!viewUpdate.docChanged) return;
+  syncDocumentChanges(editor.editor, viewUpdate.transactions);
+  debouncedSave();
+  updateDirtyCount();
 });
 
 editor.editor.dispatch({
-  effects: StateEffect.appendConfig.of([dirtyLineField, errorLineField]),
-});
-
-// Track cursor position for statusline
-editor.editor.dispatch({
-  effects: StateEffect.appendConfig.of(
-    EditorView.updateListener.of((v) => {
-      const pos = v.state.selection.main.head;
-      const line = v.state.doc.lineAt(pos);
-      const col = pos - line.from + 1;
-      infoEl.textContent = `${line.number}:${col}`;
-    })
-  ),
-});
-
-// Auto-save to localStorage on changes (debounced) + update dirty count
-editor.editor.dispatch({
-  effects: StateEffect.appendConfig.of(
-    EditorView.updateListener.of((v) => {
-      if (v.docChanged) {
-        syncDocumentChanges(editor.editor, v.transactions);
-        debouncedSave();
-        updateDirtyCount();
-      }
-    })
-  ),
+  effects: [
+    StateEffect.appendConfig.of([
+      customThemeColors,
+      Prec.highest(syntaxHighlighting(customHighlight)),
+      dirtyLineField,
+      errorLineField,
+      cursorStatusListener,
+      documentChangeListener,
+    ]),
+    compartments.isLineWrappingEnabled.reconfigure(extensions.isLineWrappingEnabled(true)),
+  ],
 });
 
 /* ── HMR: receive external file changes ────────────────── */
@@ -373,7 +373,6 @@ if (import.meta.hot) {
 }
 
 /* ── Word Wrap (Ctrl+W) ────────────────────────────────── */
-let wrapEnabled = true;
 
 function setWrap(enabled) {
   wrapEnabled = enabled;
@@ -390,8 +389,6 @@ function setWrap(enabled) {
     });
   });
 }
-
-setWrap(true);
 
 /* ── Multi-column (auto-distribute code across panels) ── */
 function clearAllDirtyLines() {
@@ -413,17 +410,19 @@ async function performEvaluation(allCode, autostart) {
   clearDiagnostic();
   editor.flash();
   try {
-    await prepareOptionalSystems(allCode);
-    ensureMasterEngine();
-    await loadSamplePacks(allCode, samples);
-    const performanceCode = routeTracksForPlayback(allCode);
-    await editor.repl.evaluate(performanceCode, autostart);
     const tracks = parseTracks(allCode);
-    mixer.sync(tracks);
+    ensureMasterEngine();
+    await Promise.all([
+      ensureAudioReady(),
+      prepareOptionalSystems(allCode),
+      loadSamplePacks(allCode, samples),
+    ]);
+    const performanceCode = routeTracksForPlayback(allCode, tracks);
+    await editor.repl.evaluate(performanceCode, autostart);
     currentSections = parseSections(allCode);
     clearAllDirtyLines();
     updateDocumentState();
-    renderTracks();
+    renderTracks(tracks);
   } catch (error) {
     showDiagnostic(error);
     throw error;
@@ -499,17 +498,17 @@ function createSecondaryEditor(initialCode = editor.code, columnIndex = 1) {
     },
   });
 
-  view.dispatch({ effects: StateEffect.appendConfig.of([dirtyLineField, errorLineField, secHighlightField]) });
   view.dispatch({
-    effects: StateEffect.appendConfig.of([
-      customThemeColors,
-      Prec.highest(syntaxHighlighting(customHighlight)),
-    ]),
-  });
-  view.dispatch({
-    effects: compartments.isLineWrappingEnabled.reconfigure(
-      extensions.isLineWrappingEnabled(wrapEnabled)
-    ),
+    effects: [
+      StateEffect.appendConfig.of([
+        dirtyLineField,
+        errorLineField,
+        secHighlightField,
+        customThemeColors,
+        Prec.highest(syntaxHighlighting(customHighlight)),
+      ]),
+      compartments.isLineWrappingEnabled.reconfigure(extensions.isLineWrappingEnabled(wrapEnabled)),
+    ],
   });
 
   view.dom.addEventListener('keydown', onEditorKeydown, { capture: true });
@@ -547,6 +546,8 @@ const trackListEl = document.getElementById('track-list');
 const trackEmptyEl = document.getElementById('track-empty');
 const trackCountEl = document.getElementById('track-count');
 const trackMeterEls = new Map();
+let renderedTrackSignature = '';
+let mixedTrackSignature = '';
 
 function focusTrack(track) {
   editor.editor.dispatch({
@@ -568,9 +569,19 @@ function toggleTrackSolo(track) {
   renderTracks();
 }
 
-function renderTracks() {
-  const tracks = parseTracks(getAllCode());
-  mixer.sync(tracks);
+function renderTracks(tracks = parseTracks(getAllCode())) {
+  const topologySignature = tracks.map((track) =>
+    `${track.key}:${track.name}:${track.line}:${track.start}:${track.end}:${track.orbit}`).join('|');
+  if (topologySignature !== mixedTrackSignature) {
+    mixedTrackSignature = topologySignature;
+    mixer.sync(tracks);
+  }
+  const signature = `${topologySignature}|${tracks.map((track) => {
+    const state = mixer.stateFor(track);
+    return `${state.gain}:${state.muted}:${state.solo}`;
+  }).join('|')}`;
+  if (signature === renderedTrackSignature) return;
+  renderedTrackSignature = signature;
   trackCountEl.textContent = String(tracks.length);
   trackEmptyEl.hidden = tracks.length > 0;
   trackListEl.replaceChildren();
@@ -598,7 +609,7 @@ function renderTracks() {
     meter.setAttribute('aria-hidden', 'true');
     const meterFill = document.createElement('span');
     meter.appendChild(meterFill);
-    trackMeterEls.set(track.key, { fill: meterFill, track });
+    trackMeterEls.set(track.key, { fill: meterFill, track, level: -1 });
 
     const controls = document.createElement('div');
     controls.className = 'track-controls';
@@ -688,6 +699,21 @@ masterVolumeEl.value = String(getMasterGain());
 masterVolumeEl.addEventListener('input', () => setMasterGain(masterVolumeEl.value));
 
 let meterFrame = 0;
+let masterLevel = -1;
+let masterPeak = -1;
+let limiterLabel = '';
+let transportCycle = '';
+let transportSection = '';
+
+function setMeterScale(element, next, previous) {
+  const rounded = Math.round(next * 100) / 100;
+  if (rounded !== previous) element.style.transform = `scaleX(${rounded})`;
+  return rounded;
+}
+
+function scheduleMeterUpdate() {
+  meterFrame = window.setTimeout(updateMasterMeter, isPlaying ? 50 : 250);
+}
 
 function updateMasterMeter() {
   if (document.hidden) {
@@ -700,18 +726,29 @@ function updateMasterMeter() {
   } catch (_) {}
   const level = Math.max(0, Math.min(1, (meter.rmsDb + 60) / 60));
   const peak = Math.max(0, Math.min(1, (meter.peakDb + 60) / 60));
-  masterLevelEl.style.width = `${Math.round(level * 100)}%`;
-  masterPeakEl.style.left = `${Math.round(peak * 100)}%`;
+  masterLevel = setMeterScale(masterLevelEl, level, masterLevel);
+  const peakPercent = Math.round(peak * 100);
+  if (peakPercent !== masterPeak) {
+    masterPeak = peakPercent;
+    masterPeakEl.style.left = `${peakPercent}%`;
+  }
   const hot = meter.peakDb > -1.1 || meter.compressionDb < -5;
-  limiterStateEl.textContent = hot ? `lim ${meter.compressionDb.toFixed(1)} dB` : 'safe';
-  limiterStateEl.classList.toggle('hot', hot);
-  for (const { fill, track } of trackMeterEls.values()) {
+  const nextLimiterLabel = hot ? `lim ${meter.compressionDb.toFixed(1)} dB` : 'safe';
+  if (nextLimiterLabel !== limiterLabel) {
+    limiterLabel = nextLimiterLabel;
+    limiterStateEl.textContent = limiterLabel;
+    limiterStateEl.classList.toggle('hot', hot);
+  }
+  for (const entry of trackMeterEls.values()) {
+    const { fill, track } = entry;
     let trackDb = -Infinity;
     try { trackDb = mixer.meterFor(track).rmsDb; } catch (_) {}
     const trackLevel = Math.max(0, Math.min(1, (trackDb + 54) / 54));
-    fill.style.width = `${Math.round(trackLevel * 100)}%`;
+    entry.level = setMeterScale(fill, trackLevel, entry.level);
   }
 
+  let nextCycle = 'cycle 1';
+  let nextSection = currentSections[0]?.name || '';
   if (isPlaying) {
     try {
       const cycle = Number(editor.repl.scheduler.now());
@@ -719,18 +756,28 @@ function updateMasterMeter() {
         ? ((Math.floor(cycle) % currentSections.at(-1).end) + currentSections.at(-1).end) % currentSections.at(-1).end
         : Math.floor(cycle);
       const section = sectionAtCycle(currentSections, cycle);
-      cycleStatusEl.textContent = `cycle ${cycleInSong + 1}`;
-      sectionStatusEl.textContent = section?.name || '';
+      nextCycle = `cycle ${cycleInSong + 1}`;
+      nextSection = section?.name || '';
     } catch (_) {}
-  } else {
-    cycleStatusEl.textContent = 'cycle 1';
-    sectionStatusEl.textContent = currentSections[0]?.name || '';
   }
-  meterFrame = requestAnimationFrame(updateMasterMeter);
+  if (nextCycle !== transportCycle) {
+    transportCycle = nextCycle;
+    cycleStatusEl.textContent = transportCycle;
+  }
+  if (nextSection !== transportSection) {
+    transportSection = nextSection;
+    sectionStatusEl.textContent = transportSection;
+  }
+  scheduleMeterUpdate();
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && !meterFrame) meterFrame = requestAnimationFrame(updateMasterMeter);
+  if (document.hidden && meterFrame) {
+    window.clearTimeout(meterFrame);
+    meterFrame = 0;
+  } else if (!document.hidden && !meterFrame) {
+    updateMasterMeter();
+  }
 });
 
 /* ── Ripples (canvas-based, one canvas per scroller) ──────── */
@@ -1040,18 +1087,18 @@ editor.highlight = function (haps, time) {
   lastHighlightTime = nowMs;
 
   // Track onsets — record timestamp when a hap first appears
-  const currentIds = new Set();
+  currentHapIds.clear();
   for (const hap of haps) {
     if (!hap.context?.locations || !hap.whole) continue;
     const uid = hapUid(hap);
-    currentIds.add(uid);
+    currentHapIds.add(uid);
     if (!activeHapIds.has(uid)) {
       activeHapIds.add(uid);
       onsetTimestamps.set(uid, nowMs);
     }
   }
   for (const uid of activeHapIds) {
-    if (!currentIds.has(uid)) {
+    if (!currentHapIds.has(uid)) {
       activeHapIds.delete(uid);
       onsetTimestamps.delete(uid);
     }
@@ -1118,7 +1165,7 @@ editor.highlight = function (haps, time) {
 
   // Ripples — onset fires immediately, held notes pulse at slow sustain rate
   const now = performance.now();
-  const currentRippleIds = new Set();
+  currentRippleIds.clear();
 
   for (const hap of haps) {
     if (!hap.context?.locations || !hap.whole) continue;
@@ -1554,7 +1601,7 @@ document.getElementById('patch-btn').addEventListener('click', () => openPatchEd
 songNameEl.addEventListener('click', showSongBrowser);
 updateMode();
 renderTracks();
-meterFrame = requestAnimationFrame(updateMasterMeter);
+updateMasterMeter();
 
 /* ── Startup: restore last synced song from disk ────────── */
 (async () => {

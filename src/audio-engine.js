@@ -50,7 +50,7 @@ export function ensureMasterEngine() {
   });
 
   const analyser = context.createAnalyser();
-  analyser.fftSize = 2048;
+  analyser.fftSize = 1024;
   analyser.smoothingTimeConstant = 0.72;
   const timeData = new Float32Array(analyser.fftSize);
   const meterSink = context.createGain();
@@ -112,7 +112,7 @@ function ensureOrbitMeter(orbitNumber) {
   if (orbitMeters.has(orbitNumber)) return orbitMeters.get(orbitNumber);
   const orbit = current.controller.getOrbit(orbitNumber);
   const analyser = current.context.createAnalyser();
-  analyser.fftSize = 512;
+  analyser.fftSize = 256;
   analyser.smoothingTimeConstant = 0.78;
   const data = new Float32Array(analyser.fftSize);
   orbit.output.connect(analyser);

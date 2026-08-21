@@ -18,6 +18,7 @@ export class RuntimeMixer {
     this.songName = songName;
     this.tracks = [];
     this.states = {};
+    this.persistTimer = 0;
     this.load();
   }
 
@@ -27,9 +28,16 @@ export class RuntimeMixer {
   }
 
   persist() {
+    window.clearTimeout(this.persistTimer);
+    const songName = this.songName;
+    const states = Object.fromEntries(Object.entries(this.states).map(([key, state]) => [key, { ...state }]));
+    this.persistTimer = window.setTimeout(() => this.persistNow(songName, states), 120);
+  }
+
+  persistNow(songName = this.songName, states = this.states) {
     try {
       const store = readStore();
-      store[this.songName] = this.states;
+      store[songName] = states;
       localStorage.setItem(MIXER_KEY, JSON.stringify(store));
     } catch {}
   }
@@ -55,7 +63,10 @@ export class RuntimeMixer {
   update(track, patch) {
     this.states[track.key] = { ...this.stateFor(track), ...patch };
     this.persist();
-    this.apply();
+    const changesAudibility = 'muted' in patch || 'solo' in patch;
+    const hasSolo = this.tracks.some((item) => this.stateFor(item).solo);
+    if (changesAudibility || hasSolo) this.apply();
+    else setOrbitGain(track.orbit, this.stateFor(track).gain);
     return this.states[track.key];
   }
 

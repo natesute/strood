@@ -3,7 +3,6 @@ import { registerSound } from 'superdough';
 import { compilePatch } from './patch-runner.mjs';
 import { registerModule, getModuleFactory, listModules } from './registry.mjs';
 import { loadCustomWorklets } from './worklets/loader.mjs';
-export { listPatchMacros, insertPatchMacro } from './macros.mjs';
 
 // Import all built-in modules to register them
 import './modules/sources.mjs';
