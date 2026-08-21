@@ -1,4 +1,4 @@
-import { StrudelMirror, initEditor, compartments, extensions, addWidget, setSliderWidgets, updateMiniLocations, registerWidget, setWidget } from '@strudel/codemirror';
+import { StrudelMirror, initEditor, compartments, extensions } from '@strudel/codemirror';
 import {
   getAudioContext,
   webaudioOutput,
@@ -7,611 +7,34 @@ import {
   samples,
 } from '@strudel/webaudio';
 import { registerPatch, initModularSynth } from './synth-modules/index.mjs';
-import { showPatchEditor, closePatchEditor, togglePatchEditor } from './patch-editor.js';
+import { togglePatchEditor } from './patch-editor.js';
 import initPatch from './synth-modules/patches/init.json';
 import acidPatch from './synth-modules/patches/acid-bass.json';
 import lushPatch from './synth-modules/patches/lush-pad.json';
 import glitchPatch from './synth-modules/patches/glitch-pluck.json';
 import voxPatch from './synth-modules/patches/vox-pad.json';
 import { transpiler } from '@strudel/transpiler';
-import { evalScope, getFrequency, freqToMidi, midiToFreq } from '@strudel/core';
+import { evalScope } from '@strudel/core';
 import { toggleLineComment } from '@codemirror/commands';
 import { Prec, StateField, StateEffect } from '@codemirror/state';
 import { EditorView, Decoration } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
-
-/* ── Canvas helper (replicates widget.mjs:96-105, not exported) ── */
-function getCanvasWidget(id, options = {}) {
-  const { width = 500, height = 60, pixelRatio = window.devicePixelRatio } = options;
-  let canvas = document.getElementById(id) || document.createElement('canvas');
-  canvas.width = width * pixelRatio;
-  canvas.height = height * pixelRatio;
-  canvas.style.width = width + 'px';
-  canvas.style.height = height + 'px';
-  setWidget(id, canvas);
-  return canvas;
-}
-
-/* ── Widget 1: _lissajous — Interval Geometry ──────────── */
-// Consonant intervals draw clean closed curves (3:2 = fifth, 5:4 = third).
-// Dissonance → chaotic open curves. This IS consonance, seen in 2D.
-registerWidget('_lissajous', (id, options = {}, pat) => {
-  const size = options.size || 200;
-  options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
-  const ctx = canvas.getContext('2d');
-
-  return pat.tag(id).onPaint((_, time, haps, drawTime) => {
-    const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    const freqs = [];
-    for (const hap of active) {
-      try { freqs.push(getFrequency(hap)); } catch (_) {}
-    }
-
-    if (freqs.length < 2) {
-      if (freqs.length === 1) {
-        ctx.strokeStyle = 'rgba(255, 0, 255, 0.4)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        const r = w * 0.35;
-        const phi = time * 0.3;
-        for (let i = 0; i <= 500; i++) {
-          const t = (i / 500) * Math.PI * 2;
-          const x = w / 2 + r * Math.sin(t + phi);
-          const y = h / 2 + r * Math.sin(t);
-          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-      }
-      return;
-    }
-
-    freqs.sort((a, b) => a - b);
-    const base = freqs[0];
-    const phi = time * 0.3;
-    const r = w * 0.35;
-    const cx = w / 2, cy = h / 2;
-
-    for (let fi = 1; fi < freqs.length; fi++) {
-      const ratio = freqs[fi] / base;
-      const alpha = 0.4 + 0.5 / freqs.length;
-      const hue = (fi * 60 + 300) % 360;
-      ctx.strokeStyle = `hsla(${hue}, 80%, 65%, ${alpha})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (let i = 0; i <= 500; i++) {
-        const t = (i / 500) * Math.PI * 2;
-        const x = cx + r * Math.sin(t + phi);
-        const y = cy + r * Math.sin(ratio * t);
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-    }
-  });
-});
-
-/* ── Widget 2: _orbit — Rhythm Circle ──────────────────── */
-// Rhythm as geometry on a circle. Symmetric rhythms form regular polygons.
-// Asymmetric patterns show groove as geometric irregularity.
-registerWidget('_orbit', (id, options = {}, pat) => {
-  const size = options.size || 150;
-  options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
-  const ctx = canvas.getContext('2d');
-
-  return pat.tag(id).onPaint((_, time, haps, drawTime) => {
-    const w = canvas.width, h = canvas.height;
-    const cx = w / 2, cy = h / 2;
-    const radius = Math.min(w, h) * 0.4;
-    ctx.clearRect(0, 0, w, h);
-
-    // Outer ring
-    ctx.strokeStyle = 'rgba(255, 60, 60, 0.3)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Rotating cursor
-    const cursorAngle = (time % 1) * Math.PI * 2 - Math.PI / 2;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + radius * Math.cos(cursorAngle), cy + radius * Math.sin(cursorAngle));
-    ctx.stroke();
-
-    // Cursor tip
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-    ctx.beginPath();
-    ctx.arc(cx + radius * Math.cos(cursorAngle), cy + radius * Math.sin(cursorAngle), 4, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Beat dots
-    const tagged = haps.filter(h => h.hasTag(id));
-    for (const hap of tagged) {
-      if (!hap.whole) continue;
-      const onset = hap.whole.begin % 1;
-      const angle = onset * Math.PI * 2 - Math.PI / 2;
-      const x = cx + radius * Math.cos(angle);
-      const y = cy + radius * Math.sin(angle);
-      const isActive = hap.isActive(time);
-
-      if (isActive) {
-        ctx.fillStyle = 'rgba(255, 80, 80, 0.3)';
-        ctx.beginPath();
-        ctx.arc(x, y, 12, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      ctx.fillStyle = isActive ? '#ff4444' : 'rgba(255, 80, 80, 0.6)';
-      ctx.beginPath();
-      ctx.arc(x, y, isActive ? 7 : 5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  });
-});
-
-/* ── Widget 3: _tonnetz — Harmonic Lattice ─────────────── */
-// x-axis = fifths (7 semitones), y-axis = major thirds (4 semitones).
-// Major triads = upward triangles, minor = downward. This is the topology of harmony.
-registerWidget('_tonnetz', (id, options = {}, pat) => {
-  const size = options.size || 250;
-  options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
-  const ctx = canvas.getContext('2d');
-
-  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-  const lattice = [];
-  const pcToPositions = new Map();
-
-  for (let gx = -3; gx <= 3; gx++) {
-    for (let gy = -2; gy <= 2; gy++) {
-      const pc = ((7 * gx + 4 * gy) % 12 + 12) % 12;
-      const node = { gx, gy, pc };
-      lattice.push(node);
-      if (!pcToPositions.has(pc)) pcToPositions.set(pc, []);
-      pcToPositions.get(pc).push(node);
-    }
-  }
-
-  return pat.tag(id).onPaint((_, time, haps, drawTime) => {
-    const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    const activePCs = new Set();
-    for (const hap of active) {
-      try {
-        const freq = getFrequency(hap);
-        const midi = Math.round(freqToMidi(freq));
-        activePCs.add(((midi % 12) + 12) % 12);
-      } catch (_) {}
-    }
-
-    const spacingX = w / 8;
-    const spacingY = h / 6;
-    const ox = w / 2, oy = h / 2;
-
-    // Grid connections (fifths horizontal, thirds vertical, diagonal)
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (const p of lattice) {
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      if (p.gx < 3) {
-        ctx.moveTo(px, py);
-        ctx.lineTo(ox + (p.gx + 1) * spacingX, py);
-      }
-      if (p.gy < 2) {
-        ctx.moveTo(px, py);
-        ctx.lineTo(px, oy - (p.gy + 1) * spacingY);
-      }
-      if (p.gx < 3 && p.gy > -2) {
-        ctx.moveTo(px, py);
-        ctx.lineTo(ox + (p.gx + 1) * spacingX, oy - (p.gy - 1) * spacingY);
-      }
-    }
-    ctx.stroke();
-
-    // Draw triangles for active triads
-    if (activePCs.size >= 3) {
-      const pcArray = [...activePCs];
-      for (let i = 0; i < pcArray.length - 2; i++) {
-        for (let j = i + 1; j < pcArray.length - 1; j++) {
-          for (let k = j + 1; k < pcArray.length; k++) {
-            const trio = [pcArray[i], pcArray[j], pcArray[k]];
-            const sets = trio.map(pc => pcToPositions.get(pc) || []);
-            for (const a of sets[0]) {
-              for (const b of sets[1]) {
-                for (const c of sets[2]) {
-                  const maxDist = Math.max(
-                    Math.abs(a.gx - b.gx) + Math.abs(a.gy - b.gy),
-                    Math.abs(b.gx - c.gx) + Math.abs(b.gy - c.gy),
-                    Math.abs(a.gx - c.gx) + Math.abs(a.gy - c.gy)
-                  );
-                  if (maxDist <= 2) {
-                    ctx.fillStyle = 'rgba(180, 120, 255, 0.12)';
-                    ctx.beginPath();
-                    ctx.moveTo(ox + a.gx * spacingX, oy - a.gy * spacingY);
-                    ctx.lineTo(ox + b.gx * spacingX, oy - b.gy * spacingY);
-                    ctx.lineTo(ox + c.gx * spacingX, oy - c.gy * spacingY);
-                    ctx.closePath();
-                    ctx.fill();
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Lattice dots
-    for (const p of lattice) {
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-    }
-
-    // Lattice dots — batched by style to reduce state changes
-    // 1) Inactive dots
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
-    ctx.beginPath();
-    for (const p of lattice) {
-      if (activePCs.has(p.pc)) continue;
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      ctx.moveTo(px + 4, py);
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-    }
-    ctx.fill();
-
-    // 2) Active glow
-    ctx.fillStyle = 'rgba(180, 120, 255, 0.3)';
-    ctx.beginPath();
-    for (const p of lattice) {
-      if (!activePCs.has(p.pc)) continue;
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      ctx.moveTo(px + 14, py);
-      ctx.arc(px, py, 14, 0, Math.PI * 2);
-    }
-    ctx.fill();
-
-    // 3) Active dots
-    ctx.fillStyle = '#bb88ff';
-    ctx.beginPath();
-    for (const p of lattice) {
-      if (!activePCs.has(p.pc)) continue;
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      ctx.moveTo(px + 8, py);
-      ctx.arc(px, py, 8, 0, Math.PI * 2);
-    }
-    ctx.fill();
-
-    // 4) Active labels
-    if (activePCs.size > 0) {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.font = `${Math.round(w / 25)}px monospace`;
-      ctx.textAlign = 'center';
-      for (const p of lattice) {
-        if (!activePCs.has(p.pc)) continue;
-        const px = ox + p.gx * spacingX;
-        const py = oy - p.gy * spacingY;
-        ctx.fillText(noteNames[p.pc], px, py - 12);
-      }
-    }
-  });
-});
-
-/* ── Widget 4: _cymatics — Chladni Vibration Patterns ──── */
-// Physical vibrating surfaces produce geometric nodal patterns.
-// Z(x,y) = cos(nπx)cos(mπy) - cos(mπx)cos(nπy), nodal lines where Z≈0.
-const _cymaticsCache = new Map();
-
-registerWidget('_cymatics', (id, options = {}, pat) => {
-  const size = options.size || 200;
-  options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
-  const ctx = canvas.getContext('2d');
-
-  return pat.tag(id).onPaint((_, time, haps, drawTime) => {
-    const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    if (active.length === 0) return;
-
-    let midi = 60;
-    try {
-      const freq = getFrequency(active[0]);
-      midi = Math.round(freqToMidi(freq));
-    } catch (_) {}
-
-    const cacheKey = `${id}:${midi}`;
-    let cached = _cymaticsCache.get(cacheKey);
-
-    if (!cached || cached.w !== w || cached.h !== h) {
-      const n = Math.max(1, Math.min(8, 1 + (midi - 30) / 60 * 7));
-      const m = n + 1;
-      const imageData = ctx.createImageData(w, h);
-      const data = imageData.data;
-
-      for (let py = 0; py < h; py++) {
-        const yNorm = py / h;
-        const cosNY = Math.cos(n * Math.PI * yNorm);
-        const cosMY = Math.cos(m * Math.PI * yNorm);
-        for (let px = 0; px < w; px++) {
-          const xNorm = px / w;
-          const z = Math.cos(n * Math.PI * xNorm) * cosMY
-                  - Math.cos(m * Math.PI * xNorm) * cosNY;
-          const intensity = 1 - Math.min(1, Math.abs(z) * 4);
-          const brightness = intensity * intensity * intensity;
-          const idx = (py * w + px) * 4;
-          data[idx]     = (brightness * 100) | 0;
-          data[idx + 1] = (brightness * 200) | 0;
-          data[idx + 2] = (brightness * 255) | 0;
-          data[idx + 3] = (brightness * 255) | 0;
-        }
-      }
-
-      cached = { imageData, w, h };
-      _cymaticsCache.set(cacheKey, cached);
-    }
-
-    ctx.putImageData(cached.imageData, 0, 0);
-  });
-});
-
-/* ── Widget 5: _harmonics — Standing Waves ─────────────── */
-// Musical intervals ARE string divisions. Octave = halved. Fifth = 3:2.
-// y(x) = (A/√n) * sin(nπx) * cos(ωt) — fixed endpoints enforced by sin.
-registerWidget('_harmonics', (id, options = {}, pat) => {
-  options = { width: 500, height: 100, ...options };
-  const canvas = getCanvasWidget(id, options);
-  const ctx = canvas.getContext('2d');
-
-  return pat.tag(id).onPaint((_, time, haps, drawTime) => {
-    const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    const baseline = h / 2;
-
-    // Baseline string
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, baseline);
-    ctx.lineTo(w, baseline);
-    ctx.stroke();
-
-    // Fixed endpoints
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    ctx.beginPath();
-    ctx.arc(0, baseline, 3, 0, Math.PI * 2);
-    ctx.arc(w, baseline, 3, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (active.length === 0) return;
-
-    const omega = time * 4;
-
-    for (let hi = 0; hi < active.length; hi++) {
-      let midi = 60;
-      try {
-        const freq = getFrequency(active[hi]);
-        midi = freqToMidi(freq);
-      } catch (_) {}
-
-      const n = Math.max(1, Math.pow(2, (midi - 36) / 12));
-      const amplitude = (h * 0.35) / Math.sqrt(n);
-      const hue = (hi * 50 + 180) % 360;
-      ctx.strokeStyle = `hsla(${hue}, 70%, 60%, 0.7)`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-
-      for (let px = 0; px <= w; px++) {
-        const x = px / w;
-        const y = baseline + amplitude * Math.sin(n * Math.PI * x) * Math.cos(omega);
-        px === 0 ? ctx.moveTo(px, y) : ctx.lineTo(px, y);
-      }
-      ctx.stroke();
-    }
-  });
-});
-
-/* ── Widget 6: _helix — Pitch Helix ───────────────────── */
-// Pitch has two dimensions: height (frequency) and chroma (octave equivalence).
-// The true topology is a helix — notes an octave apart are vertically aligned.
-registerWidget('_helix', (id, options = {}, pat) => {
-  const size = options.size || 200;
-  const turns = options.turns || 5;
-  options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
-  const ctx = canvas.getContext('2d');
-  const rootFreq = 130.81; // C3
-
-  return pat.tag(id).onPaint((_, time, haps, drawTime) => {
-    const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    const cx = w / 2;
-    const radiusX = w * 0.3;
-    const totalHeight = h * 0.85;
-    const topMargin = h * 0.075;
-    const steps = turns * 60;
-
-    // Back half of helix (behind)
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    let started = false;
-    for (let i = 0; i <= steps; i++) {
-      const frac = i / steps;
-      const angle = frac * turns * Math.PI * 2;
-      if (Math.sin(angle) > 0) { started = false; continue; }
-      const x = cx + radiusX * Math.cos(angle);
-      const y = topMargin + frac * totalHeight;
-      if (!started) { ctx.moveTo(x, y); started = true; }
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // Front half of helix
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    started = false;
-    for (let i = 0; i <= steps; i++) {
-      const frac = i / steps;
-      const angle = frac * turns * Math.PI * 2;
-      if (Math.sin(angle) <= 0) { started = false; continue; }
-      const x = cx + radiusX * Math.cos(angle);
-      const y = topMargin + frac * totalHeight;
-      if (!started) { ctx.moveTo(x, y); started = true; }
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // Plot active notes
-    for (const hap of active) {
-      try {
-        const freq = getFrequency(hap);
-        const octave = Math.log2(freq / rootFreq);
-        const frac = octave / turns;
-        if (frac < 0 || frac > 1) continue;
-
-        const angle = octave * Math.PI * 2;
-        const x = cx + radiusX * Math.cos(angle);
-        const y = topMargin + frac * totalHeight;
-
-        // Glow
-        const gradient = ctx.createRadialGradient(x, y, 0, x, y, 16);
-        gradient.addColorStop(0, 'rgba(100, 200, 255, 0.6)');
-        gradient.addColorStop(1, 'rgba(100, 200, 255, 0)');
-        ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.arc(x, y, 16, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = '#66ccff';
-        ctx.beginPath();
-        ctx.arc(x, y, 5, 0, Math.PI * 2);
-        ctx.fill();
-      } catch (_) {}
-    }
-  });
-});
-
-/* ── Widget 7: _epicycles — Fourier Spinning Circles ───── */
-// ALL sound is a sum of rotating circles (e^(iωt)). Each harmonic is a circle
-// spinning at its frequency. The tip traces the waveform. Same math as Ptolemy.
-registerWidget('_epicycles', (id, options = {}, pat) => {
-  const size = options.size || 200;
-  const harmonicsCount = options.harmonicsCount || 8;
-  options = { width: size * 2, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
-  const ctx = canvas.getContext('2d');
-  const trail = new Float32Array(200);
-  let trailIdx = 0;
-  let lastTrailTime = 0;
-
-  return pat.tag(id).onPaint((_, time, haps, drawTime) => {
-    const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    const circleArea = w / 2;
-    const epicenterX = circleArea * 0.45;
-    const epicenterY = h / 2;
-    const baseR = Math.min(circleArea, h) * 0.25;
-
-    let speed = 1;
-    if (active.length > 0) {
-      try {
-        const freq = getFrequency(active[0]);
-        const midi = freqToMidi(freq);
-        speed = 0.5 + (midi - 36) / 60;
-      } catch (_) {}
-    }
-
-    // Compute epicycle chain
-    let x = epicenterX, y = epicenterY;
-
-    for (let n = 1; n <= harmonicsCount; n++) {
-      const prevX = x, prevY = y;
-      const r = baseR * 2 / (n * Math.PI);
-      const sign = (n % 2 === 0) ? -1 : 1;
-      const angle = n * speed * time * Math.PI * 2;
-
-      x += r * Math.cos(sign * angle);
-      y += r * Math.sin(sign * angle);
-
-      // Circle
-      ctx.strokeStyle = `rgba(255, 180, 60, ${0.12 + 0.08 / n})`;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(prevX, prevY, r, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // Radius
-      ctx.strokeStyle = `rgba(255, 200, 100, ${0.25 + 0.15 / n})`;
-      ctx.beginPath();
-      ctx.moveTo(prevX, prevY);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-    }
-
-    // Tip dot
-    ctx.fillStyle = '#ffcc44';
-    ctx.beginPath();
-    ctx.arc(x, y, 4, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Update trail
-    if (time - lastTrailTime > 0.016) {
-      trail[trailIdx % trail.length] = y;
-      trailIdx++;
-      lastTrailTime = time;
-    }
-
-    // Connecting line from tip to waveform
-    const waveStartX = circleArea;
-    ctx.strokeStyle = 'rgba(255, 200, 100, 0.3)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(waveStartX, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Waveform trail
-    const trailLen = trail.length;
-    const waveWidth = w - circleArea;
-    ctx.strokeStyle = 'rgba(255, 200, 100, 0.7)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    let waveStarted = false;
-    for (let i = 0; i < trailLen; i++) {
-      const idx = ((trailIdx - 1 - i) % trailLen + trailLen) % trailLen;
-      const wy = trail[idx];
-      if (wy === 0 && !waveStarted) continue;
-      const wx = waveStartX + (i / trailLen) * waveWidth;
-      if (!waveStarted) { ctx.moveTo(wx, wy); waveStarted = true; }
-      else ctx.lineTo(wx, wy);
-    }
-    ctx.stroke();
-  });
-});
+import { getAnalyzerData } from 'superdough';
+import {
+  ApiError,
+  listSongs,
+  readSong,
+  writeSong,
+  removeSong,
+  renameSong,
+  listSongHistory,
+  readSongHistory,
+} from './src/api.js';
+import { saveRecoverySnapshot, listRecoverySnapshots, clearRecoverySnapshots } from './src/recovery.js';
+import { parseTracks, setTrackGain } from './src/tracks.js';
+import { describeError, inferErrorLine, showToast, trapFocus } from './src/ui.js';
+import './visualizers.js';
 
 const songCode = `setcpm(95/4)
 //all(x => x.scope({ color: '#ffffff22', thickness: 1, scale: 0.05 }))
@@ -657,13 +80,16 @@ $: s("hh*8").gain("[.25 .35]*4").clip(sine.range(.04,.06).fast(2)).shape(.1).col
 /* ── Shared state ────────────────────────────────────────── */
 const editorsContainer = document.getElementById('editors-container');
 const secondaryEditors = [];
-let chunkOffsets = [0]; // character offset of each chunk in combined code
 let lastEvalCode = ''; // last evaluated combined code, for location analysis
+let syncingEditors = false;
 
 /* ── Live file sync ─────────────────────────────────────── */
-let syncEnabled = false;
-let saveTimeout = null;
-let suppressNextUpdate = false;
+let currentSongName = null;
+let currentSongVersion = null;
+let lastSavedCode = '';
+let documentDirty = false;
+let pendingExternalUpdate = null;
+let recoveryTimer = 0;
 
 let _saveTimer = 0;
 function debouncedSave() {
@@ -671,6 +97,12 @@ function debouncedSave() {
   _saveTimer = setTimeout(() => {
     _saveTimer = 0;
     localStorage.setItem('strudel_code', getAllCode());
+    updateDocumentState();
+    renderTracks();
+    clearTimeout(recoveryTimer);
+    recoveryTimer = window.setTimeout(() => {
+      if (documentDirty) saveRecoverySnapshot(currentSongName, getAllCode(), 'autosave');
+    }, 8000);
   }, 300);
 }
 
@@ -721,16 +153,80 @@ const dirtyLineField = StateField.define({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+const setErrorLine = StateEffect.define();
+const errorLineField = StateField.define({
+  create() { return Decoration.none; },
+  update(decorations, transaction) {
+    decorations = decorations.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (!effect.is(setErrorLine)) continue;
+      if (effect.value == null) return Decoration.none;
+      const position = Math.min(effect.value, transaction.state.doc.length);
+      return Decoration.set([
+        Decoration.line({ class: 'cm-error-line' }).range(transaction.state.doc.lineAt(position).from),
+      ]);
+    }
+    return decorations;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
 /* ── Statusline ─────────────────────────────────────────── */
 const modeEl = document.getElementById('mode');
 const infoEl = document.getElementById('info');
 const dirtyCountEl = document.getElementById('dirty-count');
+const songNameEl = document.getElementById('song-name');
+const saveStateEl = document.getElementById('save-state');
+const runBtn = document.getElementById('run-btn');
+const stopBtn = document.getElementById('stop-btn');
+const bootStatusEl = document.getElementById('boot-status');
+const diagnosticsEl = document.getElementById('diagnostics');
+const diagnosticMessageEl = document.getElementById('diagnostic-message');
+const masterLevelEl = document.getElementById('master-level');
+const limiterStateEl = document.getElementById('limiter-state');
 let isPlaying = false;
 let currentCols = 1;
 
 function updateMode() {
   modeEl.textContent = isPlaying ? 'PLAYING' : 'STOPPED';
   modeEl.className = isPlaying ? 'playing' : 'stopped';
+  runBtn.classList.toggle('playing', isPlaying);
+  runBtn.querySelector('span').textContent = isPlaying ? 'Update' : 'Run';
+}
+
+function setSaveState(label, state = '') {
+  saveStateEl.textContent = label;
+  saveStateEl.className = `save-state ${state}`.trim();
+}
+
+function updateDocumentState() {
+  const code = getAllCode();
+  documentDirty = code !== lastSavedCode;
+  songNameEl.textContent = currentSongName || 'Untitled';
+  setSaveState(documentDirty ? 'Unsaved' : (currentSongName ? 'Saved' : 'Ready'), documentDirty ? 'unsaved' : (currentSongName ? 'saved' : ''));
+  window.onbeforeunload = documentDirty ? () => true : null;
+}
+
+function clearDiagnostic() {
+  diagnosticsEl.hidden = true;
+  diagnosticMessageEl.textContent = '';
+  [editor.editor, ...secondaryEditors.map((entry) => entry.view)].forEach((view) => {
+    view.dispatch({ effects: setErrorLine.of(null) });
+  });
+}
+
+function showDiagnostic(error) {
+  const location = inferErrorLine(error);
+  diagnosticMessageEl.textContent = describeError(error);
+  diagnosticsEl.hidden = false;
+  if (location) {
+    const line = Math.max(1, Math.min(location.line, editor.editor.state.doc.lines));
+    const position = editor.editor.state.doc.line(line).from;
+    [editor.editor, ...secondaryEditors.map((entry) => entry.view)].forEach((view) => {
+      view.dispatch({ effects: setErrorLine.of(position) });
+    });
+    editor.editor.dispatch({ effects: EditorView.scrollIntoView(position, { y: 'center' }) });
+  }
 }
 
 function updateDirtyCount() {
@@ -751,17 +247,19 @@ function updateDirtyCount() {
       }
     } catch (_) {}
   });
-  dirtyCountEl.textContent = count > 0 ? `${count} dirty` : '';
+  dirtyCountEl.textContent = count > 0 ? `${count} changed` : '';
 }
 
 // Dirty count updated on change via listener (see below), not polled
 
 /* ── Prebake ────────────────────────────────────────────── */
 const CDN = 'https://strudel.b-cdn.net';
+let samplePacksPromise = null;
 
 async function prebake() {
   initAudioOnFirstClick();
-  const modulesLoading = evalScope(
+  bootStatusEl.textContent = 'Preparing audio engine…';
+  await evalScope(
     evalScope,
     import('@strudel/core'),
     import('@strudel/draw'),
@@ -769,23 +267,28 @@ async function prebake() {
     import('@strudel/tonal'),
     import('@strudel/webaudio'),
   );
-  await Promise.all([
-    modulesLoading,
-    registerSynthSounds(),
-    samples(`${CDN}/piano.json`, `${CDN}/piano/`, { prebake: true }),
-    samples(`${CDN}/tidal-drum-machines.json`, `${CDN}/tidal-drum-machines/machines/`, { prebake: true }),
-    samples('github:tidalcycles/dirt-samples'),
-  ]);
+  await registerSynthSounds();
 
-  // Initialize modular synth engine (loads custom worklet processors)
   await initModularSynth();
-
-  // Register modular synth patches
   registerPatch('init', initPatch);
   registerPatch('acid', acidPatch);
   registerPatch('lush', lushPatch);
   registerPatch('glitch', glitchPatch);
   registerPatch('vox', voxPatch);
+
+  bootStatusEl.textContent = 'Synths ready · loading samples…';
+  if (!samplePacksPromise) {
+    samplePacksPromise = Promise.allSettled([
+      samples(`${CDN}/piano.json`, `${CDN}/piano/`, { prebake: true }),
+      samples(`${CDN}/tidal-drum-machines.json`, `${CDN}/tidal-drum-machines/machines/`, { prebake: true }),
+      samples('github:tidalcycles/dirt-samples'),
+    ]).then((results) => {
+      const failed = results.filter((result) => result.status === 'rejected').length;
+      bootStatusEl.textContent = failed ? `Synths ready · ${failed} sample pack${failed === 1 ? '' : 's'} unavailable` : 'Audio ready';
+      if (failed) showToast('Some remote samples are unavailable. Built-in synths still work.');
+      return results;
+    });
+  }
 }
 
 /* ── StrudelMirror ──────────────────────────────────────── */
@@ -800,9 +303,12 @@ const editor = new StrudelMirror({
   onUpdateState: (state) => {
     isPlaying = state.started;
     updateMode();
-    if (!state.started) clearAllDirtyLines();
   },
-  onError: (err) => console.error(err),
+  onError: (error) => {
+    console.error(error);
+    showDiagnostic(error);
+    setSaveState('Run failed', 'failed');
+  },
 });
 
 /* ── Custom theme (max color variety for Strudel code) ── */
@@ -867,37 +373,8 @@ editor.editor.dispatch({
   ]),
 });
 
-/* ── Guard dispatch against position errors in multi-column mode ── */
-const _origDispatch = editor.editor.dispatch.bind(editor.editor);
-editor.editor.dispatch = function (...args) {
-  if (currentCols > 1) {
-    const docLen = editor.editor.state.doc.length;
-    for (const spec of args) {
-      if (!spec?.effects) continue;
-      const effects = Array.isArray(spec.effects) ? spec.effects : [spec.effects];
-      for (const eff of effects) {
-        // Filter out-of-range widgets so valid ones in this panel still render
-        if (eff.is(addWidget)) {
-          eff.value = eff.value.filter((w) => w.from <= docLen && w.to <= docLen);
-        }
-        if (eff.is(setSliderWidgets)) {
-          eff.value = eff.value.filter((w) => w.from <= docLen && w.to <= docLen);
-        }
-      }
-    }
-  }
-  try {
-    return _origDispatch(...args);
-  } catch (e) {
-    if (currentCols > 1 && e.message?.includes('out of range')) {
-      return; // suppress any remaining position errors
-    }
-    throw e;
-  }
-};
-
 editor.editor.dispatch({
-  effects: StateEffect.appendConfig.of(dirtyLineField),
+  effects: StateEffect.appendConfig.of([dirtyLineField, errorLineField]),
 });
 
 // Track cursor position for statusline
@@ -917,6 +394,7 @@ editor.editor.dispatch({
   effects: StateEffect.appendConfig.of(
     EditorView.updateListener.of((v) => {
       if (v.docChanged) {
+        syncDocumentChanges(editor.editor, v.transactions);
         debouncedSave();
         updateDirtyCount();
       }
@@ -926,13 +404,20 @@ editor.editor.dispatch({
 
 /* ── HMR: receive external file changes ────────────────── */
 if (import.meta.hot) {
-  import.meta.hot.on('strudel:update', ({ code }) => {
+  import.meta.hot.on('strudel:update', ({ code, version }) => {
     if (code === getAllCode()) return;
-    suppressNextUpdate = true;
-    editor.setCode(code);
-    if (currentCols > 1) setColumnCount(currentCols); // re-split
+    if (documentDirty) {
+      pendingExternalUpdate = { code, version };
+      setSaveState('File changed on disk', 'failed');
+      showToast('The song changed on disk. Save to resolve the conflict or reopen it.');
+      return;
+    }
+    replaceAllCode(code);
+    lastSavedCode = code;
+    currentSongVersion = version || currentSongVersion;
     localStorage.setItem('strudel_code', code);
-    queueMicrotask(() => { suppressNextUpdate = false; });
+    updateDocumentState();
+    showToast('Updated from disk');
   });
 }
 
@@ -965,30 +450,57 @@ function clearAllDirtyLines() {
   });
 }
 
-function evaluateAll(autostart = true) {
-  const parts = [editor.code, ...secondaryEditors.map((e) => e.view.state.doc.toString())];
-  const allCode = parts.join('\n');
-  // Track where each chunk starts in the combined code
-  chunkOffsets = [];
-  let offset = 0;
-  for (const part of parts) {
-    chunkOffsets.push(offset);
-    offset += part.length + 1; // +1 for the \n separator
-  }
+async function evaluateAll(autostart = true) {
+  const allCode = getAllCode();
   lastEvalCode = allCode;
+  clearDiagnostic();
+  saveRecoverySnapshot(currentSongName, allCode, 'run');
   editor.flash();
-  editor.repl.evaluate(allCode, autostart);
-  clearAllDirtyLines();
+  try {
+    const performanceCode = `${allCode}\nall(x => x.analyze("strood-master").compressor(-8))`;
+    await editor.repl.evaluate(performanceCode, autostart);
+    clearAllDirtyLines();
+    updateDocumentState();
+  } catch (error) {
+    showDiagnostic(error);
+    throw error;
+  }
 }
 
-const _origEvaluate = editor.evaluate.bind(editor);
-editor.evaluate = function (autostart = true) {
-  evaluateAll(autostart);
-};
+function allEditorViews() {
+  return [editor.editor, ...secondaryEditors.map((entry) => entry.view)];
+}
 
-function createSecondaryEditor(initialCode = '') {
+function syncDocumentChanges(sourceView, transactions) {
+  if (syncingEditors) return;
+  const changed = transactions.filter((transaction) => transaction.docChanged);
+  if (!changed.length) return;
+  syncingEditors = true;
+  try {
+    for (const transaction of changed) {
+      for (const target of allEditorViews()) {
+        if (target === sourceView) continue;
+        target.dispatch({ changes: transaction.changes });
+      }
+    }
+  } finally {
+    syncingEditors = false;
+  }
+}
+
+function replaceAllCode(code) {
+  const current = editor.editor.state.doc.toString();
+  if (current === code) return;
+  editor.editor.dispatch({
+    changes: { from: 0, to: current.length, insert: code },
+    selection: { anchor: 0 },
+  });
+}
+
+function createSecondaryEditor(initialCode = editor.code, columnIndex = 1) {
   const panel = document.createElement('div');
   panel.className = 'editor-panel';
+  panel.setAttribute('aria-label', `Song code editor, column ${columnIndex + 1}`);
   editorsContainer.appendChild(panel);
 
   const view = initEditor({
@@ -996,10 +508,12 @@ function createSecondaryEditor(initialCode = '') {
     initialCode,
     onEvaluate: () => evaluateAll(),
     onStop: () => editor.stop(),
-    onChange: () => { debouncedSave(); },
+    onChange: (update) => {
+      if (update.docChanged) syncDocumentChanges(view, update.transactions);
+    },
   });
 
-  view.dispatch({ effects: StateEffect.appendConfig.of([dirtyLineField, secHighlightField]) });
+  view.dispatch({ effects: StateEffect.appendConfig.of([dirtyLineField, errorLineField, secHighlightField]) });
   view.dispatch({
     effects: StateEffect.appendConfig.of([
       customThemeColors,
@@ -1012,90 +526,165 @@ function createSecondaryEditor(initialCode = '') {
     ),
   });
 
-  view.dom.addEventListener('keydown', onEditorKeydown);
+  view.dom.addEventListener('keydown', onEditorKeydown, { capture: true });
+  view.contentDOM.setAttribute('aria-label', `Song code, column ${columnIndex + 1}`);
+  view.scrollDOM.tabIndex = 0;
   const entry = { view, root: panel };
   secondaryEditors.push(entry);
   return entry;
 }
 
-/** Collect all code, split into N roughly-equal chunks at section
- *  boundaries (lines starting with $: or // SECTION), then distribute
- *  across N editor panels. */
 function setColumnCount(n) {
-  // Gather all code from every panel
-  const allCode = [
-    editor.code,
-    ...secondaryEditors.map((e) => e.view.state.doc.toString()),
-  ].join('\n');
-
-  // Tear down existing secondary editors
+  const code = getAllCode();
   while (secondaryEditors.length) {
     const removed = secondaryEditors.pop();
+    removed.view.destroy();
     removed.root.remove();
   }
 
   currentCols = n;
-  _primaryScroller = null; // invalidate cached scroller ref
-  if (n === 1) {
-    // Single column — put everything back in primary
-    editor.setCode(allCode);
-    return;
-  }
+  _primaryScroller = null;
+  for (let i = 1; i < n; i++) createSecondaryEditor(code, i);
 
-  // Split into sections at $: or // boundaries, then merge comment-only
-  // sections with the following code block so headers stay with their code
-  const lines = allCode.split('\n');
-  const rawSections = [];
-  let current = [];
-  for (const line of lines) {
-    const trimmed = line.trimStart();
-    if ((trimmed.startsWith('$:') || trimmed.startsWith('//')) && current.length > 0) {
-      rawSections.push(current.join('\n'));
-      current = [];
-    }
-    current.push(line);
-  }
-  if (current.length) rawSections.push(current.join('\n'));
-
-  // Merge comment/blank-only sections forward into the next code section
-  const sections = [];
-  for (let i = 0; i < rawSections.length; i++) {
-    const sLines = rawSections[i].split('\n');
-    const isCommentOnly = sLines.every((l) => {
-      const t = l.trimStart();
-      return t === '' || t.startsWith('//');
+  requestAnimationFrame(() => {
+    const views = allEditorViews();
+    views.forEach((view, index) => {
+      const lineNumber = Math.max(1, Math.ceil((view.state.doc.lines * index) / n));
+      const position = view.state.doc.line(lineNumber).from;
+      view.dispatch({ effects: EditorView.scrollIntoView(position, { y: 'start' }) });
     });
-    if (isCommentOnly && i + 1 < rawSections.length) {
-      rawSections[i + 1] = rawSections[i] + '\n' + rawSections[i + 1];
-    } else {
-      sections.push(rawSections[i]);
-    }
-  }
+  });
+}
 
-  // Distribute sections sequentially (preserving order), balancing by line count
-  const totalLines = sections.reduce((sum, s) => sum + s.split('\n').length, 0);
-  const targetPerChunk = Math.ceil(totalLines / n);
-  const chunks = [[]];
-  let currentChunkLines = 0;
-  for (const section of sections) {
-    const sectionLines = section.split('\n').length;
-    if (currentChunkLines > 0 && currentChunkLines + sectionLines > targetPerChunk && chunks.length < n) {
-      chunks.push([]);
-      currentChunkLines = 0;
-    }
-    chunks[chunks.length - 1].push(section);
-    currentChunkLines += sectionLines;
-  }
-  while (chunks.length < n) chunks.push([]);
+/* ── Track rail ───────────────────────────────────────────── */
+const trackListEl = document.getElementById('track-list');
+const trackEmptyEl = document.getElementById('track-empty');
+const trackCountEl = document.getElementById('track-count');
+const mutedTrackGains = new Map();
+let soloTrackIndex = null;
+let soloRestoreGains = null;
 
-  // Primary editor gets chunk 0
-  editor.setCode(chunks[0].join('\n'));
+function focusTrack(track) {
+  editor.editor.dispatch({
+    selection: { anchor: track.start },
+    effects: EditorView.scrollIntoView(track.start, { y: 'center' }),
+  });
+  editor.editor.focus();
+}
 
-  // Create secondary editors for the rest
-  for (let i = 1; i < n; i++) {
-    createSecondaryEditor(chunks[i].join('\n'));
+function applyTrackGain(trackIndex, gain) {
+  const nextCode = setTrackGain(getAllCode(), trackIndex, gain);
+  replaceAllCode(nextCode);
+  renderTracks();
+}
+
+function toggleTrackMute(track) {
+  const key = `${track.index}:${track.name}`;
+  if (track.muted) {
+    applyTrackGain(track.index, mutedTrackGains.get(key) ?? 1);
+    mutedTrackGains.delete(key);
+  } else {
+    mutedTrackGains.set(key, track.gain || 1);
+    applyTrackGain(track.index, 0);
   }
 }
+
+function toggleTrackSolo(track) {
+  let code = getAllCode();
+  const tracks = parseTracks(code);
+  if (soloTrackIndex === track.index && soloRestoreGains) {
+    soloRestoreGains.forEach((gain, index) => { code = setTrackGain(code, index, gain); });
+    soloTrackIndex = null;
+    soloRestoreGains = null;
+  } else {
+    if (soloRestoreGains) soloRestoreGains.forEach((gain, index) => { code = setTrackGain(code, index, gain); });
+    const restoredTracks = parseTracks(code);
+    soloRestoreGains = restoredTracks.map((item) => item.gain);
+    soloTrackIndex = track.index;
+    restoredTracks.forEach((item) => {
+      if (item.index !== track.index) code = setTrackGain(code, item.index, 0);
+    });
+  }
+  replaceAllCode(code);
+  renderTracks();
+}
+
+function renderTracks() {
+  const tracks = parseTracks(getAllCode());
+  trackCountEl.textContent = String(tracks.length);
+  trackEmptyEl.hidden = tracks.length > 0;
+  trackListEl.replaceChildren();
+
+  tracks.forEach((track) => {
+    const strip = document.createElement('section');
+    strip.className = `track-strip${track.muted ? ' muted' : ''}`;
+    strip.style.setProperty('--track-color', track.colour);
+    strip.tabIndex = 0;
+    strip.setAttribute('aria-label', `${track.name}, line ${track.line}`);
+    strip.addEventListener('click', () => focusTrack(track));
+    strip.addEventListener('keydown', (event) => { if (event.key === 'Enter') focusTrack(track); });
+
+    const name = document.createElement('div');
+    name.className = 'track-name';
+    name.textContent = track.name;
+    const meta = document.createElement('div');
+    meta.className = 'track-meta';
+    meta.textContent = `line ${track.line} · ${Math.round(track.gain * 100)}%`;
+
+    const controls = document.createElement('div');
+    controls.className = 'track-controls';
+    const mute = document.createElement('button');
+    mute.type = 'button';
+    mute.className = `track-button${track.muted ? ' active' : ''}`;
+    mute.textContent = 'M';
+    mute.setAttribute('aria-label', `${track.muted ? 'Unmute' : 'Mute'} ${track.name}`);
+    mute.addEventListener('click', (event) => { event.stopPropagation(); toggleTrackMute(track); });
+
+    const solo = document.createElement('button');
+    solo.type = 'button';
+    solo.className = `track-button${soloTrackIndex === track.index ? ' active' : ''}`;
+    solo.textContent = 'S';
+    solo.setAttribute('aria-label', `${soloTrackIndex === track.index ? 'Clear solo for' : 'Solo'} ${track.name}`);
+    solo.addEventListener('click', (event) => { event.stopPropagation(); toggleTrackSolo(track); });
+
+    const gain = document.createElement('input');
+    gain.type = 'range';
+    gain.className = 'track-gain';
+    gain.min = '0'; gain.max = '1.5'; gain.step = '0.05'; gain.value = String(track.gain);
+    gain.setAttribute('aria-label', `${track.name} gain`);
+    gain.addEventListener('click', (event) => event.stopPropagation());
+    gain.addEventListener('change', (event) => { event.stopPropagation(); applyTrackGain(track.index, event.target.value); });
+    controls.append(mute, solo, gain);
+    strip.append(name, meta, controls);
+    trackListEl.appendChild(strip);
+  });
+}
+
+let meterFrame = 0;
+
+function updateMasterMeter() {
+  if (document.hidden) {
+    meterFrame = 0;
+    return;
+  }
+  let level = 0;
+  try {
+    const data = getAnalyzerData('time', 'strood-master');
+    if (data?.length) {
+      let sum = 0;
+      for (let index = 0; index < data.length; index++) sum += data[index] * data[index];
+      level = Math.min(1, Math.sqrt(sum / data.length) * 3.2);
+    }
+  } catch (_) {}
+  masterLevelEl.style.width = `${Math.round(level * 100)}%`;
+  limiterStateEl.textContent = level > 0.92 ? 'hot' : 'safe';
+  limiterStateEl.classList.toggle('hot', level > 0.92);
+  meterFrame = requestAnimationFrame(updateMasterMeter);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !meterFrame) meterFrame = requestAnimationFrame(updateMasterMeter);
+});
 
 /* ── Ripples (canvas-based, one canvas per scroller) ──────── */
 
@@ -1266,14 +855,10 @@ function resolveHapPosition(loc) {
     }
   } catch (_) {}
   for (let i = 0; i < secondaryEditors.length; i++) {
-    const off = chunkOffsets[i + 1] ?? Infinity;
-    const adjStart = loc.start - off;
-    const adjEnd = loc.end - off;
-    if (adjStart < 0) continue;
     try {
       const secView = secondaryEditors[i].view;
-      const start = secView.coordsAtPos(adjStart);
-      const end = secView.coordsAtPos(adjEnd);
+      const start = secView.coordsAtPos(loc.start);
+      const end = secView.coordsAtPos(loc.end);
       if (start && end) {
         let scroller = _secScrollerCache.get(secView);
         if (!scroller) { scroller = secView.dom.querySelector('.cm-scroller'); _secScrollerCache.set(secView, scroller); }
@@ -1463,7 +1048,6 @@ editor.highlight = function (haps, time) {
   if (currentCols > 1 && secondaryEditors.length > 0) {
     for (let i = 0; i < secondaryEditors.length; i++) {
       const sec = secondaryEditors[i];
-      const off = chunkOffsets[i + 1] ?? Infinity;
       const docLen = sec.view.state.doc.length;
       const marks = [];
       for (const hap of haps) {
@@ -1471,8 +1055,8 @@ editor.highlight = function (haps, time) {
         const color = hap.value?.color ?? 'var(--foreground)';
         const style = hap.value?.markcss || `outline: solid 2px ${color}`;
         for (const loc of hap.context.locations) {
-          const from = loc.start - off;
-          const to = loc.end - off;
+          const from = loc.start;
+          const to = loc.end;
           if (from >= 0 && to <= docLen && from < to) {
             marks.push(Decoration.mark({ attributes: { style } }).range(from, to));
           }
@@ -1524,13 +1108,15 @@ editor.highlight = function (haps, time) {
 /* ── Keyboard handler (all shortcuts) ───────────────────── */
 async function onEditorKeydown(e) {
   const ctrl = e.ctrlKey || e.metaKey;
+  const handledKeys = ['Enter', 'm', 'w', '1', '2', '3', 'u', '.', 's', 'p', 'o', 'n'];
+  if (ctrl && handledKeys.includes(e.key)) e.stopPropagation();
 
   const view = e.currentTarget.cmView?.view || editor.editor;
 
   // Ctrl+Enter — evaluate
   if (ctrl && e.key === 'Enter') {
     e.preventDefault();
-    evaluateAll();
+    evaluateAll().catch(() => {});
     return;
   }
 
@@ -1558,7 +1144,7 @@ async function onEditorKeydown(e) {
   // Ctrl+U — update live
   if (ctrl && e.key === 'u') {
     e.preventDefault();
-    evaluateAll(true);
+    evaluateAll(true).catch(() => {});
     return;
   }
 
@@ -1593,138 +1179,310 @@ async function onEditorKeydown(e) {
   // Ctrl+N — new song
   if (ctrl && e.key === 'n') {
     e.preventDefault();
-    const code = getAllCode();
-    if (code.trim()) {
-      const choice = confirm('Save current song before creating a new one?');
-      if (choice) await saveSong();
-    }
-    loadSong('');
+    await newSong();
     return;
   }
 }
 
 /* ── Save / Load songs (file-backed via /api/songs) ──── */
-let currentSongName = null;
-
 function getAllCode() {
-  return [editor.code, ...secondaryEditors.map(e => e.view.state.doc.toString())].join('\n');
+  return editor.editor.state.doc.toString();
 }
 
 async function saveSong() {
   const name = currentSongName || prompt('Song name:');
   if (!name) return;
-  currentSongName = name;
-  localStorage.setItem('strudel_song_name', name);
-  await fetch(`/api/songs/${encodeURIComponent(name)}`, {
-    method: 'PUT',
-    body: getAllCode(),
-  });
-  // Activate sync for this file
-  syncEnabled = true;
-  import.meta.hot?.send('strudel:open', { name, code: getAllCode() });
-  infoEl.textContent = `saved "${name}"`;
+  const code = getAllCode();
+  setSaveState('Saving…');
+  saveRecoverySnapshot(currentSongName || name, code, 'before save');
+  try {
+    let result;
+    try {
+      result = await writeSong(name, code, currentSongName === name ? currentSongVersion : null);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'version_conflict') throw error;
+      const overwrite = confirm('This song changed on disk after you opened it. Save your version over the disk copy? The disk copy will remain in recovery history.');
+      if (!overwrite) {
+        pendingExternalUpdate = { name };
+        setSaveState('Conflict unresolved', 'failed');
+        return false;
+      }
+      result = await writeSong(name, code, null);
+    }
+    currentSongName = name;
+    currentSongVersion = result.version;
+    lastSavedCode = code;
+    pendingExternalUpdate = null;
+    localStorage.setItem('strudel_song_name', name);
+    localStorage.setItem('strudel_code', code);
+    clearRecoverySnapshots(name);
+    import.meta.hot?.send('strudel:open', { name, code });
+    updateDocumentState();
+    showToast(`Saved ${name}`);
+    return true;
+  } catch (error) {
+    setSaveState('Save failed', 'failed');
+    showDiagnostic(error);
+    return false;
+  }
 }
 
-function loadSong(code, name) {
-  while (secondaryEditors.length) secondaryEditors.pop().root.remove();
-  currentCols = 1;
-  editor.setCode(code);
+function loadSong(code, name = null, version = null, savedCode = code) {
+  replaceAllCode(code);
   localStorage.setItem('strudel_code', code);
   if (name) {
     currentSongName = name;
+    currentSongVersion = version;
+    lastSavedCode = savedCode;
     localStorage.setItem('strudel_song_name', name);
-    syncEnabled = true;
     import.meta.hot?.send('strudel:open', { name, code });
   } else {
     currentSongName = null;
+    currentSongVersion = null;
+    lastSavedCode = savedCode;
     localStorage.removeItem('strudel_song_name');
-    syncEnabled = false;
   }
+  pendingExternalUpdate = null;
+  clearDiagnostic();
+  updateDocumentState();
+  renderTracks();
   closeSongBrowser();
 }
 
 async function deleteSong(name) {
-  await fetch(`/api/songs/${encodeURIComponent(name)}`, { method: 'DELETE' });
-  showSongBrowser();
+  if (!confirm(`Move “${name}” to Strood’s recoverable trash?`)) return;
+  try {
+    await removeSong(name);
+    if (currentSongName === name) loadSong('', null, null, '');
+    await showSongBrowser();
+    showToast(`${name} moved to trash`);
+  } catch (error) { showDiagnostic(error); }
 }
 
 let songBrowserEl = null;
+let songBrowserPreviousFocus = null;
+
+async function prepareToReplaceCurrent(action) {
+  if (!documentDirty) return true;
+  if (confirm(`Save changes to “${currentSongName || 'Untitled'}” before ${action}?`)) return Boolean(await saveSong());
+  return confirm('Discard the unsaved changes?');
+}
+
+async function newSong() {
+  if (!(await prepareToReplaceCurrent('creating a new song'))) return;
+  saveRecoverySnapshot(currentSongName, getAllCode(), 'before new song');
+  loadSong('', null, null, '');
+  editor.editor.focus();
+}
+
+async function openNamedSong(name) {
+  if (!(await prepareToReplaceCurrent(`opening “${name}”`))) return;
+  try {
+    const song = await readSong(name);
+    loadSong(song.code, name, song.version, song.code);
+  } catch (error) { showDiagnostic(error); }
+}
+
+async function restoreSongVersion(name, code) {
+  try {
+    const current = await readSong(name);
+    loadSong(code, name, current.version, current.code);
+    setSaveState('Recovered, unsaved', 'unsaved');
+    showToast('Recovery opened. Save to make it current.');
+  } catch (error) { showDiagnostic(error); }
+}
+
+function songAction(label, onClick, className = '') {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `song-action ${className}`.trim();
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+async function showHistory(panel, name, showList) {
+  panel.replaceChildren();
+  const header = document.createElement('div');
+  header.className = 'song-browser-header';
+  const title = document.createElement('div');
+  title.className = 'song-title';
+  title.textContent = `Recovery · ${name}`;
+  const back = songAction('Back', showList);
+  header.append(title, back);
+  panel.appendChild(header);
+
+  try {
+    const [diskHistory, localHistory] = await Promise.all([
+      listSongHistory(name),
+      Promise.resolve(listRecoverySnapshots(name)),
+    ]);
+    const versions = [
+      ...diskHistory.map((item) => ({ ...item, source: 'disk' })),
+      ...localHistory.map((item) => ({ id: item.id, createdAt: item.createdAt, source: 'local', code: item.code })),
+    ].sort((a, b) => b.createdAt - a.createdAt);
+    if (!versions.length) {
+      const empty = document.createElement('p');
+      empty.className = 'rail-empty';
+      empty.textContent = 'No recovery versions yet.';
+      panel.appendChild(empty);
+      return;
+    }
+    versions.forEach((version) => {
+      const row = document.createElement('div');
+      row.className = 'song-row';
+      const label = document.createElement('span');
+      label.className = 'song-name';
+      label.textContent = new Date(version.createdAt).toLocaleString();
+      const source = document.createElement('span');
+      source.className = 'song-date';
+      source.textContent = version.source === 'disk' ? 'saved version' : 'local recovery';
+      const restore = songAction('Open', async () => {
+        const code = version.source === 'disk' ? await readSongHistory(name, version.id) : version.code;
+        await restoreSongVersion(name, code);
+      });
+      row.append(label, source, restore);
+      panel.appendChild(row);
+    });
+  } catch (error) { showDiagnostic(error); }
+}
 
 async function showSongBrowser() {
   closeSongBrowser();
-  const songs = await fetch('/api/songs').then(r => r.json());
-
   const overlay = document.createElement('div');
   overlay.id = 'song-browser';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Saved songs');
+  overlay.tabIndex = -1;
   overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSongBrowser(); });
-  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSongBrowser(); });
+  overlay.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeSongBrowser();
+    trapFocus(overlay, event);
+  });
 
   const panel = document.createElement('div');
   panel.className = 'song-panel';
-
-  const title = document.createElement('div');
-  title.className = 'song-title';
-  title.textContent = songs.length ? 'saved songs' : 'no saved songs';
-  panel.appendChild(title);
-
-  for (const song of songs) {
-    const row = document.createElement('div');
-    row.className = 'song-row';
-
-    const label = document.createElement('span');
-    label.className = 'song-name';
-    label.textContent = song.name;
-    label.addEventListener('click', async () => {
-      const code = await fetch(`/api/songs/${encodeURIComponent(song.name)}`).then(r => r.text());
-      loadSong(code, song.name);
-    });
-
-    const date = document.createElement('span');
-    date.className = 'song-date';
-    date.textContent = new Date(song.mtime).toLocaleDateString();
-
-    const del = document.createElement('span');
-    del.className = 'song-delete';
-    del.textContent = '×';
-    del.addEventListener('click', (e) => { e.stopPropagation(); deleteSong(song.name); });
-
-    row.append(label, date, del);
-    panel.appendChild(row);
-  }
-
-  const newBtn = document.createElement('div');
-  newBtn.className = 'song-row song-new';
-  newBtn.textContent = '+ new';
-  newBtn.addEventListener('click', () => { loadSong(''); });
-  panel.appendChild(newBtn);
-
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
   songBrowserEl = overlay;
-  overlay.focus();
+  songBrowserPreviousFocus = document.activeElement;
+
+  const showList = async () => {
+    panel.replaceChildren();
+    let songs = [];
+    try { songs = await listSongs(); }
+    catch (error) { showDiagnostic(error); closeSongBrowser(); return; }
+
+    const header = document.createElement('div');
+    header.className = 'song-browser-header';
+    const title = document.createElement('div');
+    title.className = 'song-title';
+    title.textContent = songs.length ? 'Saved songs' : 'No saved songs';
+    const search = document.createElement('input');
+    search.className = 'song-search';
+    search.type = 'search';
+    search.placeholder = 'Filter songs';
+    search.setAttribute('aria-label', 'Filter saved songs');
+    const close = songAction('Close', closeSongBrowser);
+    header.append(title, search, close);
+    panel.appendChild(header);
+
+    const rows = document.createElement('div');
+    panel.appendChild(rows);
+    const renderRows = (query = '') => {
+      rows.replaceChildren();
+      songs.filter((song) => song.name.toLowerCase().includes(query.toLowerCase())).forEach((song) => {
+        const row = document.createElement('div');
+        row.className = 'song-row';
+        const label = document.createElement('button');
+        label.type = 'button';
+        label.className = 'song-name';
+        label.textContent = song.name;
+        label.addEventListener('click', () => openNamedSong(song.name));
+        const date = document.createElement('span');
+        date.className = 'song-date';
+        date.textContent = new Date(song.mtime).toLocaleDateString();
+        const actions = document.createElement('span');
+        actions.className = 'song-actions';
+        actions.append(
+          songAction('History', () => showHistory(panel, song.name, showList)),
+          songAction('Duplicate', async () => {
+            const copyName = prompt('Duplicate name:', `${song.name} copy`);
+            if (!copyName) return;
+            try { const source = await readSong(song.name); await writeSong(copyName, source.code); await showList(); }
+            catch (error) { showDiagnostic(error); }
+          }),
+          songAction('Rename', async () => {
+            const nextName = prompt('New song name:', song.name);
+            if (!nextName || nextName === song.name) return;
+            try {
+              await renameSong(song.name, nextName);
+              if (currentSongName === song.name) {
+                currentSongName = nextName;
+                localStorage.setItem('strudel_song_name', nextName);
+                updateDocumentState();
+              }
+              await showList();
+            } catch (error) { showDiagnostic(error); }
+          }),
+          songAction('Delete', () => deleteSong(song.name), 'danger'),
+        );
+        row.append(label, date, actions);
+        rows.appendChild(row);
+      });
+    };
+    search.addEventListener('input', () => renderRows(search.value));
+    renderRows();
+
+    const footer = document.createElement('div');
+    footer.className = 'song-new';
+    const newButton = document.createElement('button');
+    newButton.type = 'button';
+    newButton.className = 'control control-primary';
+    newButton.textContent = 'New song';
+    newButton.addEventListener('click', newSong);
+    footer.appendChild(newButton);
+    panel.appendChild(footer);
+    search.focus();
+  };
+
+  await showList();
 }
 
 function closeSongBrowser() {
   if (songBrowserEl) { songBrowserEl.remove(); songBrowserEl = null; }
-  editor.editor.focus();
+  if (songBrowserPreviousFocus?.isConnected) songBrowserPreviousFocus.focus();
+  else editor.editor.focus();
+  songBrowserPreviousFocus = null;
 }
 
-editor.editor.dom.addEventListener('keydown', onEditorKeydown);
+editor.editor.dom.addEventListener('keydown', onEditorKeydown, { capture: true });
+editor.editor.contentDOM.setAttribute('aria-label', 'Song code');
+editor.editor.scrollDOM.tabIndex = 0;
+document.getElementById('diagnostic-close').addEventListener('click', clearDiagnostic);
+runBtn.addEventListener('click', () => evaluateAll().catch(() => {}));
+stopBtn.addEventListener('click', () => editor.stop());
+document.getElementById('save-btn').addEventListener('click', saveSong);
+document.getElementById('open-btn').addEventListener('click', showSongBrowser);
+document.getElementById('new-btn').addEventListener('click', newSong);
+document.getElementById('patch-btn').addEventListener('click', togglePatchEditor);
+songNameEl.addEventListener('click', showSongBrowser);
 updateMode();
+renderTracks();
+meterFrame = requestAnimationFrame(updateMasterMeter);
 
 /* ── Startup: restore last synced song from disk ────────── */
 (async () => {
   const songName = localStorage.getItem('strudel_song_name') || 'ms jackson';
   try {
-    const res = await fetch(`/api/songs/${encodeURIComponent(songName)}`);
-    if (res.ok) {
-      const code = await res.text();
-      currentSongName = songName;
-      localStorage.setItem('strudel_song_name', songName);
-      editor.setCode(code);
-      localStorage.setItem('strudel_code', code);
-      syncEnabled = true;
-      import.meta.hot?.send('strudel:open', { name: songName, code });
-    }
-  } catch (_) {}
+    const song = await readSong(songName);
+    loadSong(song.code, songName, song.version, song.code);
+  } catch (error) {
+    lastSavedCode = '';
+    currentSongName = null;
+    currentSongVersion = null;
+    updateDocumentState();
+    if (!(error instanceof ApiError) || error.status !== 404) showDiagnostic(error);
+  }
 })();

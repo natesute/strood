@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>strudel</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Strood is a local live-coding studio for writing and performing Strudel songs.">
+  <title>Strood</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230d1117' stroke='%23e6b450' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='none' stroke='%2356d4dd' stroke-width='2'/%3E%3Ccircle cx='24' cy='7' r='3' fill='%23f07178'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fragment+Mono&display=swap" rel="stylesheet">
@@ -10,30 +13,89 @@
   <link rel="stylesheet" href="patch-editor.css">
 </head>
 <body>
-  <div id="main">
-    <div id="editors-container">
-      <div id="editor" class="editor-panel"></div>
+  <header id="transport" aria-label="Song transport">
+    <h1 class="brand" aria-label="Strood live coding studio">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">strood</span>
+    </h1>
+
+    <div class="song-identity">
+      <span class="eyebrow">song</span>
+      <button id="song-name" class="song-name-button" type="button" title="Open songs">Untitled</button>
+      <span id="save-state" class="save-state" role="status" aria-live="polite">Ready</span>
     </div>
-    <canvas id="viz"></canvas>
+
+    <div class="transport-actions">
+      <button id="run-btn" class="control control-primary" type="button" title="Run or update (Ctrl+Enter)">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>
+        <span>Run</span>
+      </button>
+      <button id="stop-btn" class="control" type="button" title="Stop (Ctrl+.)">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>
+        <span>Stop</span>
+      </button>
+      <span class="transport-divider" aria-hidden="true"></span>
+      <button id="save-btn" class="control" type="button" title="Save song (Ctrl+S)">Save</button>
+      <button id="open-btn" class="control" type="button" title="Open songs (Ctrl+O)">Open</button>
+      <button id="new-btn" class="control" type="button" title="New song (Ctrl+N)">New</button>
+      <button id="patch-btn" class="control control-patch" type="button" title="Open patch studio (Ctrl+P)">Patch</button>
+    </div>
+
+    <div class="master" aria-label="Master output activity">
+      <span class="eyebrow">master</span>
+      <div class="master-meter" aria-hidden="true"><span id="master-level"></span></div>
+      <span id="limiter-state" class="limiter-state">safe</span>
+    </div>
+  </header>
+
+  <div id="workspace">
+    <aside id="track-rail" aria-label="Song tracks">
+      <div class="rail-header">
+        <span class="eyebrow">tracks</span>
+        <span id="track-count">0</span>
+      </div>
+      <div id="track-list"></div>
+      <p id="track-empty" class="rail-empty">Name sections with comments such as <code>// BASS</code>.</p>
+    </aside>
+
+    <main id="main">
+      <div id="editors-container">
+        <div id="editor" class="editor-panel" aria-label="Song code editor"></div>
+      </div>
+      <canvas id="viz" aria-hidden="true"></canvas>
+    </main>
   </div>
-  <div id="statusline">
-    <span id="mode">STOPPED</span>
-    <span class="sep">|</span>
-    <span id="info">col:1</span>
-    <span class="sep">|</span>
+
+  <section id="diagnostics" class="diagnostics" aria-live="assertive" hidden>
+    <div class="diagnostic-indicator" aria-hidden="true"></div>
+    <div class="diagnostic-copy">
+      <strong id="diagnostic-title">Couldn’t run this version</strong>
+      <span id="diagnostic-message"></span>
+    </div>
+    <button id="diagnostic-close" class="icon-button" type="button" aria-label="Dismiss error">×</button>
+  </section>
+
+  <footer id="statusline">
+    <span id="mode" class="stopped" role="status">STOPPED</span>
+    <span class="sep" aria-hidden="true">|</span>
+    <span id="info">1:1</span>
+    <span class="sep" aria-hidden="true">|</span>
     <span id="dirty-count"></span>
-    <span class="right">
-      <span class="hint">C-enter eval</span>
-      <span class="hint">C-. stop</span>
-      <span class="hint">C-s save</span>
-      <span class="hint">C-o open</span>
-      <span class="hint">C-n new</span>
-      <span class="hint">C-m mute</span>
-      <span class="hint">C-p patch</span>
-      <span class="hint">C-w wrap</span>
-      <span class="hint">C-1/2/3 cols</span>
-    </span>
-  </div>
+    <span id="boot-status" class="boot-status" role="status" aria-live="polite">Audio loads when you run</span>
+    <details class="shortcut-menu">
+      <summary>Shortcuts</summary>
+      <div class="shortcut-popover">
+        <span><kbd>Ctrl</kbd><kbd>Enter</kbd> Run</span>
+        <span><kbd>Ctrl</kbd><kbd>.</kbd> Stop</span>
+        <span><kbd>Ctrl</kbd><kbd>S</kbd> Save</span>
+        <span><kbd>Ctrl</kbd><kbd>O</kbd> Open</span>
+        <span><kbd>Ctrl</kbd><kbd>P</kbd> Patch</span>
+        <span><kbd>Ctrl</kbd><kbd>1–3</kbd> Columns</span>
+      </div>
+    </details>
+  </footer>
+
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
   <script type="module" src="main.js"></script>
 </body>
 </html>

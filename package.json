@@ -1,11 +1,15 @@
 {
   "name": "strudel-ide",
   "version": "1.0.0",
-  "description": "",
+  "description": "A local Strudel live-coding studio with visual instruments and file-backed songs.",
   "main": "index.js",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "check": "npm run test && npm run build && npm run test:e2e"
   },
   "keywords": [],
   "author": "",
@@ -20,5 +24,10 @@
     "@strudel/transpiler": "^1.2.6",
     "@strudel/webaudio": "^1.3.0",
     "vite": "^7.3.1"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.62.1",
+    "vitest": "^4.1.11"
   }
 }

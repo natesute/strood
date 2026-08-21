@@ -1,16 +1,24 @@
 // Patch Editor — free-form node graph with draggable modules and visual wiring
 import { registerPatch, listModules, getModuleFactory } from './synth-modules/index.mjs';
 import { superdough, getAudioContext } from 'superdough';
+import { listPatches, readPatch, writePatch } from './src/api.js';
+import { showToast, trapFocus } from './src/ui.js';
 
 let overlayEl = null;
 let patchDef = null;
 let currentPatchName = null;
 let selectedModuleId = null;
 let commitTimeout = null;
+let historyTimeout = null;
+let patchDirty = false;
+let undoStack = [];
+let redoStack = [];
+let previousFocus = null;
 
 // Graph state
 let graphEl, innerEl, wiresSvg, bottomBar;
 let panX = 0, panY = 0;
+let graphScale = 1;
 let dragWire = null; // { fromId, fromType, svgPath }
 
 const modColors = ['#56d4dd', '#c678dd', '#7ee787', '#e6b450', '#ff5370'];
@@ -28,10 +36,96 @@ function fmt(v) {
   if (Number.isInteger(n)) return String(n);
   return n.toFixed(Math.abs(n) < 10 ? 2 : 1);
 }
+function snapshotPatch() {
+  return patchDef ? JSON.stringify(patchDef) : '';
+}
+function setPatchDirty(value) {
+  patchDirty = value;
+  const indicator = overlayEl?.querySelector('.pe-dirty');
+  if (indicator) {
+    indicator.textContent = value ? 'Unsaved' : 'Saved';
+    indicator.classList.toggle('unsaved', value);
+  }
+}
+function resetHistory() {
+  undoStack = patchDef ? [snapshotPatch()] : [];
+  redoStack = [];
+  updateHistoryButtons();
+}
+function recordHistory() {
+  if (!patchDef) return;
+  const snapshot = snapshotPatch();
+  if (undoStack.at(-1) !== snapshot) undoStack.push(snapshot);
+  if (undoStack.length > 60) undoStack.shift();
+  redoStack = [];
+  updateHistoryButtons();
+}
+function restoreSnapshot(snapshot) {
+  patchDef = JSON.parse(snapshot);
+  selectedModuleId = null;
+  registerPatch(currentPatchName, patchDef);
+  setPatchDirty(true);
+  renderAll();
+  updateHistoryButtons();
+}
+function undoPatch() {
+  if (undoStack.length < 2) return;
+  const current = undoStack.pop();
+  redoStack.push(current);
+  restoreSnapshot(undoStack.at(-1));
+}
+function redoPatch() {
+  const next = redoStack.pop();
+  if (!next) return;
+  undoStack.push(next);
+  restoreSnapshot(next);
+}
+function updateHistoryButtons() {
+  const undo = overlayEl?.querySelector('[data-action="undo"]');
+  const redo = overlayEl?.querySelector('[data-action="redo"]');
+  if (undo) undo.disabled = undoStack.length < 2;
+  if (redo) redo.disabled = redoStack.length === 0;
+}
 function commitPatch() {
   if (!patchDef || !currentPatchName) return;
+  setPatchDirty(true);
   clearTimeout(commitTimeout);
+  clearTimeout(historyTimeout);
   commitTimeout = setTimeout(() => registerPatch(currentPatchName, patchDef), 50);
+  historyTimeout = setTimeout(recordHistory, 140);
+}
+function applyGraphTransform() {
+  if (innerEl) innerEl.style.transform = `translate(${panX}px, ${panY}px) scale(${graphScale})`;
+}
+function setGraphScale(nextScale, anchorX = graphEl?.clientWidth / 2, anchorY = graphEl?.clientHeight / 2) {
+  const previous = graphScale;
+  graphScale = Math.max(0.45, Math.min(1.8, nextScale));
+  if (graphEl && previous !== graphScale) {
+    panX = anchorX - ((anchorX - panX) / previous) * graphScale;
+    panY = anchorY - ((anchorY - panY) / previous) * graphScale;
+  }
+  applyGraphTransform();
+  requestAnimationFrame(drawWires);
+  const readout = overlayEl?.querySelector('.pe-zoom-readout');
+  if (readout) readout.textContent = `${Math.round(graphScale * 100)}%`;
+}
+function fitGraph() {
+  if (!graphEl || !patchDef) return;
+  const positions = Object.values(patchDef.positions || {});
+  if (!positions.length) return;
+  const minX = Math.min(...positions.map((position) => position.x));
+  const minY = Math.min(...positions.map((position) => position.y));
+  const maxX = Math.max(...positions.map((position) => position.x + 180));
+  const maxY = Math.max(...positions.map((position) => position.y + 190));
+  const width = Math.max(1, maxX - minX);
+  const height = Math.max(1, maxY - minY);
+  graphScale = Math.max(0.45, Math.min(1.35, Math.min((graphEl.clientWidth - 100) / width, (graphEl.clientHeight - 80) / height)));
+  panX = (graphEl.clientWidth - width * graphScale) / 2 - minX * graphScale;
+  panY = (graphEl.clientHeight - height * graphScale) / 2 - minY * graphScale;
+  applyGraphTransform();
+  requestAnimationFrame(drawWires);
+  const readout = overlayEl?.querySelector('.pe-zoom-readout');
+  if (readout) readout.textContent = `${Math.round(graphScale * 100)}%`;
 }
 function nextId(type) {
   const meta = getModuleMeta(type);
@@ -142,7 +236,27 @@ function createEnvelopeDisplay(moduleId, def) {
     c.setAttribute('fill', '#e6b450'); c.setAttribute('stroke', '#0a0e14');
     c.setAttribute('stroke-width', '1'); c.setAttribute('cursor', 'pointer');
     c.setAttribute('class', 'pe-env-handle');
+    c.setAttribute('tabindex', '0');
+    c.setAttribute('role', 'slider');
+    c.setAttribute('aria-label', ['Attack', 'Decay and sustain', 'Release'][idx]);
+    c.setAttribute('aria-valuemin', idx === 1 ? '0' : '0.001');
+    c.setAttribute('aria-valuemax', idx === 1 ? '10' : '10');
+    c.setAttribute('aria-valuenow', String([a, d, r][idx]));
+    if (idx === 1) c.setAttribute('aria-valuetext', `Decay ${d.toFixed(2)}, sustain ${s.toFixed(2)}`);
     svg.appendChild(c);
+
+    c.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      event.preventDefault();
+      const step = event.shiftKey ? 0.1 : 0.01;
+      const direction = ['ArrowRight', 'ArrowUp'].includes(event.key) ? 1 : -1;
+      if (idx === 0) def.params.a = Math.max(0.001, a + direction * step);
+      else if (idx === 2) def.params.r = Math.max(0.01, r + direction * step);
+      else if (['ArrowLeft', 'ArrowRight'].includes(event.key)) def.params.d = Math.max(0.001, d + direction * step);
+      else def.params.s = Math.max(0, Math.min(1, s + direction * step));
+      commitPatch();
+      renderAll();
+    });
 
     c.addEventListener('mousedown', (e) => {
       e.preventDefault(); e.stopPropagation();
@@ -251,6 +365,12 @@ function createKnob(moduleId, paramName, value, min, max, onInput) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
   svg.setAttribute('class', 'pe-knob-svg');
+  svg.setAttribute('tabindex', '0');
+  svg.setAttribute('role', 'slider');
+  svg.setAttribute('aria-label', `${moduleId} ${paramName}`);
+  svg.setAttribute('aria-valuemin', String(min));
+  svg.setAttribute('aria-valuemax', String(max));
+  svg.setAttribute('aria-valuenow', String(value));
 
   const track = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   track.setAttribute('d', arc(startA, endA));
@@ -293,6 +413,7 @@ function createKnob(moduleId, paramName, value, min, max, onInput) {
     const onMove = (ev) => {
       const dy = startY - ev.clientY;
       value = Math.max(min, Math.min(max, startVal + dy * ((max - min) / 150)));
+      svg.setAttribute('aria-valuenow', String(value));
       onInput(value);
     };
     const onUp = () => {
@@ -301,6 +422,17 @@ function createKnob(moduleId, paramName, value, min, max, onInput) {
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  });
+
+  svg.addEventListener('keydown', (event) => {
+    const direction = event.key === 'ArrowUp' || event.key === 'ArrowRight' ? 1 : event.key === 'ArrowDown' || event.key === 'ArrowLeft' ? -1 : 0;
+    if (!direction) return;
+    event.preventDefault();
+    const step = (max - min) / (event.shiftKey ? 20 : 100);
+    value = Math.max(min, Math.min(max, value + direction * step));
+    svg.setAttribute('aria-valuenow', String(value));
+    onInput(value);
+    renderAll();
   });
 
   return svg;
@@ -318,6 +450,9 @@ function createNode(id) {
   node.dataset.moduleId = id;
   node.style.left = pos.x + 'px';
   node.style.top = pos.y + 'px';
+  node.tabIndex = 0;
+  node.setAttribute('role', 'group');
+  node.setAttribute('aria-label', `${def.type} module ${id}`);
 
   // Header (drag handle)
   const header = document.createElement('div');
@@ -331,9 +466,11 @@ function createNode(id) {
   idEl.className = 'pe-node-id';
   idEl.textContent = id;
 
-  const removeEl = document.createElement('span');
+  const removeEl = document.createElement('button');
+  removeEl.type = 'button';
   removeEl.className = 'pe-node-remove';
   removeEl.textContent = '×';
+  removeEl.setAttribute('aria-label', `Remove ${id}`);
   removeEl.onclick = (e) => {
     e.stopPropagation();
     delete patchDef.modules[id];
@@ -355,8 +492,8 @@ function createNode(id) {
     const startMX = e.clientX, startMY = e.clientY;
     const startX = pos.x, startY = pos.y;
     const onMove = (ev) => {
-      pos.x = startX + (ev.clientX - startMX);
-      pos.y = startY + (ev.clientY - startMY);
+      pos.x = startX + (ev.clientX - startMX) / graphScale;
+      pos.y = startY + (ev.clientY - startMY) / graphScale;
       node.style.left = pos.x + 'px';
       node.style.top = pos.y + 'px';
       patchDef.positions[id] = { x: pos.x, y: pos.y };
@@ -365,6 +502,7 @@ function createNode(id) {
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      commitPatch();
       renderAll();
     };
     window.addEventListener('mousemove', onMove);
@@ -403,6 +541,7 @@ function createNode(id) {
         label.textContent = paramName;
         const select = document.createElement('select');
         select.className = 'pe-enum-select';
+        select.setAttribute('aria-label', `${id} ${paramName}`);
         paramMeta.values.forEach(v => {
           const opt = document.createElement('option');
           opt.value = v; opt.textContent = v;
@@ -437,6 +576,9 @@ function createNode(id) {
         const paramPort = document.createElement('div');
         paramPort.className = 'pe-port-param';
         paramPort.dataset.paramTarget = `${id}.${paramName}`;
+        paramPort.tabIndex = 0;
+        paramPort.setAttribute('role', 'button');
+        paramPort.setAttribute('aria-label', `${id} ${paramName} modulation input`);
         paramPort.addEventListener('mousedown', (e) => e.stopPropagation());
         paramPort.addEventListener('mouseup', (e) => {
           e.stopPropagation();
@@ -461,6 +603,9 @@ function createNode(id) {
     portIn.className = 'pe-port pe-port-in';
     portIn.dataset.portType = 'audio-in';
     portIn.dataset.portModuleId = id;
+    portIn.tabIndex = 0;
+    portIn.setAttribute('role', 'button');
+    portIn.setAttribute('aria-label', `${id} audio input`);
     portIn.addEventListener('mouseup', (e) => {
       e.stopPropagation();
       if (dragWire && dragWire.fromType === 'audio-out') {
@@ -476,6 +621,9 @@ function createNode(id) {
     portOut.className = 'pe-port pe-port-out';
     portOut.dataset.portType = 'audio-out';
     portOut.dataset.portModuleId = id;
+    portOut.tabIndex = 0;
+    portOut.setAttribute('role', 'button');
+    portOut.setAttribute('aria-label', `${id} audio output`);
     portOut.addEventListener('mousedown', (e) => {
       e.preventDefault(); e.stopPropagation();
       startDragWire(id, 'audio-out', e);
@@ -489,6 +637,9 @@ function createNode(id) {
     portMod.className = 'pe-port pe-port-mod-out';
     portMod.dataset.portType = 'mod-out';
     portMod.dataset.portModuleId = id;
+    portMod.tabIndex = 0;
+    portMod.setAttribute('role', 'button');
+    portMod.setAttribute('aria-label', `${id} modulation output`);
     portMod.addEventListener('mousedown', (e) => {
       e.preventDefault(); e.stopPropagation();
       startDragWire(id, 'mod-out', e);
@@ -511,14 +662,14 @@ function startDragWire(fromId, fromType, e) {
   const fromPort = fromNode.querySelector(fromType === 'audio-out' ? '.pe-port-out' : '.pe-port-mod-out');
   const fromRect = fromPort.getBoundingClientRect();
   const innerRect = innerEl.getBoundingClientRect();
-  const x1 = fromRect.left + 5 - innerRect.left;
-  const y1 = fromRect.top + 5 - innerRect.top;
+  const x1 = (fromRect.left + fromRect.width / 2 - innerRect.left) / graphScale;
+  const y1 = (fromRect.top + fromRect.height / 2 - innerRect.top) / graphScale;
 
   dragWire = { fromId, fromType, svgPath, x1, y1 };
 
   const onMove = (ev) => {
-    const x2 = ev.clientX - innerRect.left;
-    const y2 = ev.clientY - innerRect.top;
+    const x2 = (ev.clientX - innerRect.left) / graphScale;
+    const y2 = (ev.clientY - innerRect.top) / graphScale;
     const midY = (y1 + y2) / 2;
     svgPath.setAttribute('d', `M${x1},${y1} C${x1},${midY} ${x2},${midY} ${x2},${y2}`);
   };
@@ -577,7 +728,7 @@ function drawWires() {
     const nr = node.getBoundingClientRect();
     const pr = port.getBoundingClientRect();
     const ir = innerEl.getBoundingClientRect();
-    return { x: pr.left + 5 - ir.left, y: pr.top + 5 - ir.top };
+    return { x: (pr.left + pr.width / 2 - ir.left) / graphScale, y: (pr.top + pr.height / 2 - ir.top) / graphScale };
   };
 
   // Signal wires
@@ -599,7 +750,7 @@ function drawWires() {
     if (!from || !knobEl) return;
     const kr = knobEl.getBoundingClientRect();
     const ir = innerEl.getBoundingClientRect();
-    const to = { x: kr.left + kr.width / 2 - ir.left, y: kr.top + kr.height / 2 - ir.top };
+    const to = { x: (kr.left + kr.width / 2 - ir.left) / graphScale, y: (kr.top + kr.height / 2 - ir.top) / graphScale };
     const midX = (from.x + to.x) / 2;
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', `M${from.x},${from.y} C${midX},${from.y} ${midX},${to.y} ${to.x},${to.y}`);
@@ -668,8 +819,10 @@ function renderBottomBar() {
       window.addEventListener('mouseup', onUp);
     });
 
-    const removeBtn = document.createElement('span');
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
     removeBtn.className = 'pe-mod-remove'; removeBtn.textContent = '×';
+    removeBtn.setAttribute('aria-label', `Remove modulation from ${mod.src} to ${mod.dst}`);
     removeBtn.onclick = () => { patchDef.matrix.splice(idx, 1); commitPatch(); renderAll(); };
 
     chip.append(src, arrow, dst, depthBar, depthVal, removeBtn);
@@ -699,46 +852,66 @@ function renderAll() {
   requestAnimationFrame(() => drawWires());
 }
 
-// ── Context menu (right-click to add module) ─────────────
+// ── Module palette ────────────────────────────────────────
+function addModule(module, graphX, graphY) {
+  const id = nextId(module.type);
+  const defaults = {};
+  if (module.params) {
+    for (const [key, value] of Object.entries(module.params)) {
+      if (value.default != null) defaults[key] = value.default;
+    }
+  }
+  patchDef.modules[id] = { type: module.type, params: defaults };
+  if (!patchDef.positions) patchDef.positions = {};
+  patchDef.positions[id] = { x: graphX, y: graphY };
+  commitPatch();
+  renderAll();
+  closeContextMenu();
+}
+
 function showContextMenu(x, y, graphX, graphY) {
   closeContextMenu();
   const menu = document.createElement('div');
   menu.className = 'pe-context-menu';
   menu.style.left = x + 'px'; menu.style.top = y + 'px';
+  menu.setAttribute('role', 'dialog');
+  menu.setAttribute('aria-label', 'Add synth module');
 
   const modules = listModules();
-  const cats = {};
-  modules.forEach(m => (cats[m.category || 'other'] = cats[m.category || 'other'] || []).push(m));
+  const search = document.createElement('input');
+  search.className = 'pe-menu-search';
+  search.type = 'search';
+  search.placeholder = 'Find a module';
+  search.setAttribute('aria-label', 'Find a synth module');
+  const results = document.createElement('div');
+  menu.append(search, results);
 
-  for (const [cat, items] of Object.entries(cats)) {
-    const catEl = document.createElement('div');
-    catEl.className = 'pe-menu-cat'; catEl.textContent = cat;
-    menu.appendChild(catEl);
-    items.forEach(m => {
-      const item = document.createElement('div');
-      item.className = 'pe-menu-item'; item.textContent = m.type;
-      item.onclick = () => {
-        const id = nextId(m.type);
-        const defaults = {};
-        if (m.params) {
-          for (const [k, v] of Object.entries(m.params)) {
-            if (v.default != null) defaults[k] = v.default;
-          }
-        }
-        patchDef.modules[id] = { type: m.type, params: defaults };
-        if (!patchDef.positions) patchDef.positions = {};
-        patchDef.positions[id] = { x: graphX, y: graphY };
-        commitPatch(); renderAll();
-        closeContextMenu();
-      };
-      menu.appendChild(item);
-    });
-  }
+  const renderModules = (query = '') => {
+    results.replaceChildren();
+    const filtered = modules.filter((module) => module.type.toLowerCase().includes(query.toLowerCase()));
+    const cats = {};
+    filtered.forEach((module) => (cats[module.category || 'other'] = cats[module.category || 'other'] || []).push(module));
+    for (const [cat, items] of Object.entries(cats)) {
+      const catEl = document.createElement('div');
+      catEl.className = 'pe-menu-cat'; catEl.textContent = cat;
+      results.appendChild(catEl);
+      items.forEach((module) => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'pe-menu-item'; item.textContent = module.type;
+        item.onclick = () => addModule(module, graphX, graphY);
+        results.appendChild(item);
+      });
+    }
+  };
+  search.addEventListener('input', () => renderModules(search.value));
+  renderModules();
 
   document.body.appendChild(menu);
   const close = (e) => { if (!menu.contains(e.target)) { closeContextMenu(); document.removeEventListener('mousedown', close); } };
   setTimeout(() => document.addEventListener('mousedown', close), 0);
   menu._closeListener = close;
+  search.focus();
 }
 
 function closeContextMenu() {
@@ -752,6 +925,9 @@ function closeContextMenu() {
 function buildOverlay() {
   const overlay = document.createElement('div');
   overlay.id = 'patch-editor';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Patch studio');
   overlay.addEventListener('click', (e) => { if (e.target === overlay) closePatchEditor(); });
 
   const panel = document.createElement('div');
@@ -762,8 +938,33 @@ function buildOverlay() {
   header.className = 'pe-header';
   const patchSelect = document.createElement('select');
   patchSelect.className = 'pe-select';
+  patchSelect.setAttribute('aria-label', 'Current synth patch');
+  const dirty = document.createElement('span');
+  dirty.className = 'pe-dirty';
+  dirty.textContent = 'Saved';
+  const addBtn = document.createElement('button');
+  addBtn.className = 'pe-btn pe-btn-accent'; addBtn.textContent = 'add module';
+  addBtn.onclick = () => {
+    const rect = addBtn.getBoundingClientRect();
+    const graphRect = graphEl.getBoundingClientRect();
+    const graphX = (graphEl.clientWidth / 2 - panX) / graphScale;
+    const graphY = (graphEl.clientHeight / 2 - panY) / graphScale;
+    showContextMenu(rect.left, Math.min(rect.bottom + 6, graphRect.bottom - 320), graphX, graphY);
+  };
+  const undoBtn = document.createElement('button');
+  undoBtn.className = 'pe-btn'; undoBtn.textContent = 'undo'; undoBtn.dataset.action = 'undo'; undoBtn.onclick = undoPatch;
+  const redoBtn = document.createElement('button');
+  redoBtn.className = 'pe-btn'; redoBtn.textContent = 'redo'; redoBtn.dataset.action = 'redo'; redoBtn.onclick = redoPatch;
   const spacer = document.createElement('div');
   spacer.className = 'pe-spacer';
+  const zoomOut = document.createElement('button');
+  zoomOut.className = 'pe-btn pe-btn-square'; zoomOut.textContent = '−'; zoomOut.setAttribute('aria-label', 'Zoom out'); zoomOut.onclick = () => setGraphScale(graphScale - 0.1);
+  const zoomReadout = document.createElement('span');
+  zoomReadout.className = 'pe-zoom-readout'; zoomReadout.textContent = `${Math.round(graphScale * 100)}%`;
+  const zoomIn = document.createElement('button');
+  zoomIn.className = 'pe-btn pe-btn-square'; zoomIn.textContent = '+'; zoomIn.setAttribute('aria-label', 'Zoom in'); zoomIn.onclick = () => setGraphScale(graphScale + 0.1);
+  const fitBtn = document.createElement('button');
+  fitBtn.className = 'pe-btn'; fitBtn.textContent = 'fit'; fitBtn.onclick = fitGraph;
   const saveBtn = document.createElement('button');
   saveBtn.className = 'pe-btn'; saveBtn.textContent = 'save';
   saveBtn.onclick = savePatch;
@@ -773,7 +974,7 @@ function buildOverlay() {
   const closeBtn = document.createElement('button');
   closeBtn.className = 'pe-btn pe-btn-close'; closeBtn.textContent = '×';
   closeBtn.onclick = closePatchEditor;
-  header.append(patchSelect, spacer, saveBtn, saveAsBtn, closeBtn);
+  header.append(patchSelect, dirty, addBtn, undoBtn, redoBtn, spacer, zoomOut, zoomReadout, zoomIn, fitBtn, saveBtn, saveAsBtn, closeBtn);
 
   // Graph area
   graphEl = document.createElement('div');
@@ -781,7 +982,7 @@ function buildOverlay() {
 
   innerEl = document.createElement('div');
   innerEl.className = 'pe-graph-inner';
-  innerEl.style.transform = `translate(${panX}px, ${panY}px)`;
+  applyGraphTransform();
   graphEl.appendChild(innerEl);
 
   // Pan by dragging background
@@ -792,7 +993,7 @@ function buildOverlay() {
     const startX = e.clientX - panX, startY = e.clientY - panY;
     const onMove = (ev) => {
       panX = ev.clientX - startX; panY = ev.clientY - startY;
-      innerEl.style.transform = `translate(${panX}px, ${panY}px)`;
+      applyGraphTransform();
     };
     const onUp = () => {
       graphEl.classList.remove('panning');
@@ -803,17 +1004,24 @@ function buildOverlay() {
     window.addEventListener('mouseup', onUp);
   });
 
+  graphEl.addEventListener('wheel', (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const rect = graphEl.getBoundingClientRect();
+    setGraphScale(graphScale + (event.deltaY < 0 ? 0.1 : -0.1), event.clientX - rect.left, event.clientY - rect.top);
+  }, { passive: false });
+
   // Right-click to add module
   graphEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const ir = innerEl.getBoundingClientRect();
-    showContextMenu(e.clientX, e.clientY, e.clientX - ir.left, e.clientY - ir.top);
+    showContextMenu(e.clientX, e.clientY, (e.clientX - ir.left) / graphScale, (e.clientY - ir.top) / graphScale);
   });
 
   // Hint
   const hint = document.createElement('div');
   hint.className = 'pe-hint';
-  hint.textContent = 'right-click to add · drag ports to connect';
+  hint.textContent = 'add module or right-click · drag ports to connect · ctrl-scroll to zoom';
   graphEl.appendChild(hint);
 
   // Bottom bar
@@ -829,6 +1037,13 @@ function buildOverlay() {
   overlay.tabIndex = 0;
   overlay.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closePatchEditor();
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      e.shiftKey ? redoPatch() : undoPatch();
+      return;
+    }
+    trapFocus(overlay, e);
+    if (e.target.closest('input, select, button, [contenteditable="true"]')) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (selectedModuleId && patchDef.modules[selectedModuleId]) {
         delete patchDef.modules[selectedModuleId];
@@ -842,13 +1057,14 @@ function buildOverlay() {
   });
 
   loadPatchList(patchSelect);
+  updateHistoryButtons();
   return overlay;
 }
 
 // ── Patch load/save ──────────────────────────────────────
 async function loadPatchList(selectEl) {
   try {
-    const patches = await fetch('/api/patches').then(r => r.json());
+    const patches = await listPatches();
     selectEl.innerHTML = patches.map(p =>
       `<option value="${p.name}"${p.name === currentPatchName ? ' selected' : ''}>${p.name}</option>`
     ).join('');
@@ -859,24 +1075,36 @@ async function loadPatchList(selectEl) {
 }
 
 async function loadPatch(name) {
+  if (patchDirty && currentPatchName && name !== currentPatchName && !confirm(`Discard unsaved changes to “${currentPatchName}”?`)) {
+    const select = overlayEl?.querySelector('.pe-select');
+    if (select) select.value = currentPatchName;
+    return;
+  }
   try {
-    const data = await fetch(`/api/patches/${encodeURIComponent(name)}`).then(r => r.json());
+    const data = await readPatch(name);
     patchDef = data;
     currentPatchName = name;
     selectedModuleId = null;
     // Register under filename so the keyboard can play it
     registerPatch(name, patchDef);
     autoLayout();
+    resetHistory();
+    setPatchDirty(false);
     renderAll();
+    requestAnimationFrame(fitGraph);
   } catch (e) { console.warn('[patch-editor] Failed to load:', name, e); }
 }
 
 async function savePatch() {
   if (!patchDef || !currentPatchName) return;
-  await fetch(`/api/patches/${encodeURIComponent(currentPatchName)}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patchDef, null, 2),
-  });
+  try {
+    await writePatch(currentPatchName, patchDef);
+    setPatchDirty(false);
+    showToast(`Saved patch ${currentPatchName}`);
+  } catch (error) {
+    setPatchDirty(true);
+    showToast(`Patch save failed: ${error.message}`);
+  }
 }
 
 async function saveAsPatch() {
@@ -923,8 +1151,10 @@ function createKeyboard() {
   ];
 
   notes.forEach(({ note, name, black }) => {
-    const key = document.createElement('div');
+    const key = document.createElement('button');
+    key.type = 'button';
     key.className = black ? 'pe-key pe-key-black' : 'pe-key pe-key-white';
+    key.setAttribute('aria-label', `Play ${name}${note < 60 ? '3' : '4'}`);
 
     const playNote = () => {
       if (!currentPatchName) return;
@@ -968,7 +1198,8 @@ function createKeyboard() {
 
 // ── Public API ───────────────────────────────────────────
 export function showPatchEditor() {
-  closePatchEditor();
+  if (overlayEl && !closePatchEditor()) return;
+  previousFocus = document.activeElement;
   overlayEl = buildOverlay();
   document.body.appendChild(overlayEl);
   overlayEl.focus();
@@ -976,10 +1207,15 @@ export function showPatchEditor() {
 
 export function closePatchEditor() {
   if (overlayEl) {
+    if (patchDirty && !confirm(`Discard unsaved changes to “${currentPatchName || 'this patch'}”?`)) return false;
+    closeContextMenu();
     overlayEl.remove();
     overlayEl = null;
     graphEl = innerEl = wiresSvg = bottomBar = null;
+    if (previousFocus?.isConnected) previousFocus.focus();
+    previousFocus = null;
   }
+  return true;
 }
 
 export function togglePatchEditor() {
