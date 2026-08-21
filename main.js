@@ -51,10 +51,43 @@ let currentSections = [];
 let queuedUpdateTimer = 0;
 let queuedTargetCycle = null;
 let audioReadyPromise = null;
+let activeAudioContext = null;
+let audioStateListener = null;
 
-function ensureAudioReady() {
-  audioReadyPromise ||= initAudio();
-  return audioReadyPromise;
+function audioIsRunning() {
+  return activeAudioContext?.state === 'running';
+}
+
+function bindAudioContext(context) {
+  if (activeAudioContext === context) return;
+  if (activeAudioContext && audioStateListener) {
+    activeAudioContext.removeEventListener('statechange', audioStateListener);
+  }
+  activeAudioContext = context;
+  audioStateListener = () => {
+    updateMode();
+    if (isPlaying && !document.hidden && ['suspended', 'interrupted'].includes(context.state)) {
+      context.resume().then(updateMode).catch(() => {});
+    }
+  };
+  context.addEventListener('statechange', audioStateListener);
+}
+
+async function ensureAudioReady() {
+  if (!audioReadyPromise) {
+    audioReadyPromise = initAudio().catch((error) => {
+      audioReadyPromise = null;
+      throw error;
+    });
+  }
+  await audioReadyPromise;
+  const context = getAudioContext();
+  bindAudioContext(context);
+  if (context.state !== 'running') await context.resume();
+  if (context.state !== 'running') {
+    throw new Error(`Audio could not resume (${context.state}). Click Resume to try again.`);
+  }
+  return context;
 }
 
 let _saveTimer = 0;
@@ -159,10 +192,11 @@ let isPlaying = false;
 let currentCols = 1;
 
 function updateMode() {
-  modeEl.textContent = isPlaying ? 'PLAYING' : 'STOPPED';
-  modeEl.className = isPlaying ? 'playing' : 'stopped';
-  runBtn.classList.toggle('playing', isPlaying);
-  runBtn.querySelector('span').textContent = isPlaying ? 'Update' : 'Run';
+  const audioPaused = isPlaying && !audioIsRunning();
+  modeEl.textContent = audioPaused ? 'AUDIO PAUSED' : (isPlaying ? 'PLAYING' : 'STOPPED');
+  modeEl.className = isPlaying && !audioPaused ? 'playing' : 'stopped';
+  runBtn.classList.toggle('playing', isPlaying && !audioPaused);
+  runBtn.querySelector('span').textContent = audioPaused ? 'Resume' : (isPlaying ? 'Update' : 'Run');
   if (!isPlaying) clearQueuedUpdate();
 }
 
@@ -564,9 +598,11 @@ function updateMasterMeter() {
     return;
   }
   let meter = { rmsDb: -Infinity, peakDb: -Infinity, compressionDb: 0, limiterDb: 0 };
-  try {
-    meter = readMasterMeter();
-  } catch (_) {}
+  if (audioIsRunning()) {
+    try {
+      meter = readMasterMeter();
+    } catch (_) {}
+  }
   const level = Math.max(0, Math.min(1, (meter.rmsDb + 60) / 60));
   const peak = Math.max(0, Math.min(1, (meter.peakDb + 60) / 60));
   masterLevel = setMeterScale(masterLevelEl, level, masterLevel);
@@ -582,9 +618,9 @@ function updateMasterMeter() {
     limiterStateEl.textContent = limiterLabel;
     limiterStateEl.classList.toggle('hot', hot);
   }
-  let nextCycle = 'cycle 1';
-  let nextSection = currentSections[0]?.name || '';
-  if (isPlaying) {
+  let nextCycle = isPlaying ? (transportCycle || 'cycle 1') : 'cycle 1';
+  let nextSection = currentSections[0]?.name || 'loop';
+  if (isPlaying && audioIsRunning()) {
     try {
       const cycle = Number(editor.repl.scheduler.now());
       const cycleInSong = currentSections.length
@@ -592,7 +628,7 @@ function updateMasterMeter() {
         : Math.floor(cycle);
       const section = sectionAtCycle(currentSections, cycle);
       nextCycle = `cycle ${cycleInSong + 1}`;
-      nextSection = section?.name || '';
+      nextSection = section?.name || 'loop';
     } catch (_) {}
   }
   if (nextCycle !== transportCycle) {
@@ -612,6 +648,9 @@ document.addEventListener('visibilitychange', () => {
     meterFrame = 0;
   } else if (!document.hidden && !meterFrame) {
     updateMasterMeter();
+  }
+  if (!document.hidden && isPlaying && !audioIsRunning()) {
+    ensureAudioReady().then(updateMode).catch(() => updateMode());
   }
 });
 
@@ -1427,7 +1466,13 @@ editorsContainer.addEventListener('strood:inline-control-commit', () => {
   if (isPlaying) evaluateAll().catch(() => {});
 });
 document.getElementById('diagnostic-close').addEventListener('click', clearDiagnostic);
-runBtn.addEventListener('click', () => evaluateAll().catch(() => {}));
+runBtn.addEventListener('click', () => {
+  if (isPlaying && !audioIsRunning()) {
+    ensureAudioReady().then(updateMode).catch(showDiagnostic);
+    return;
+  }
+  evaluateAll().catch(() => {});
+});
 stopBtn.addEventListener('click', () => { clearQueuedUpdate(); editor.stop(); });
 document.getElementById('save-btn').addEventListener('click', saveSong);
 document.getElementById('open-btn').addEventListener('click', showSongBrowser);

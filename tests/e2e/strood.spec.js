@@ -13,7 +13,8 @@ test('exposes the core live-coding workflow without hidden shortcuts', async ({ 
   await expect(page.getByRole('textbox', { name: 'Song code' })).toBeVisible();
   await expect(page.locator('#track-region')).toHaveCount(0);
   await expect(page.getByRole('combobox', { name: 'Solo track' })).toBeVisible();
-  await expect(page.locator('.cm-smart-number[data-smart-name="cycles"]')).toHaveCount(7);
+  await expect(page.locator('.cm-smart-number[data-smart-name="cycles"]')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Song code' })).not.toContainText('const arrangement');
   await expect.poll(() => page.evaluate(() =>
     (localStorage.getItem('strudel_code')?.match(/mute: false/g) || []).length)).toBe(8);
 });
@@ -71,6 +72,16 @@ test('plays the source-mastered song through the protected output', async ({ pag
   await expect.poll(async () => await page.locator('#master-level').getAttribute('style') || '', { timeout: 15000 })
     .not.toContain('scaleX(0)');
   await expect(page.locator('#diagnostics')).toBeHidden();
+
+  await page.evaluate(async () => {
+    const { ensureMasterEngine } = await import('/src/audio-engine.js');
+    await ensureMasterEngine().context.suspend();
+  });
+  await expect.poll(() => page.evaluate(async () => {
+    const { ensureMasterEngine } = await import('/src/audio-engine.js');
+    return ensureMasterEngine().context.state;
+  })).toBe('running');
+  await expect(page.getByRole('status').filter({ hasText: 'PLAYING' })).toBeVisible();
 });
 
 test('uses keyboard-safe app dialogs instead of native prompts', async ({ page }) => {
