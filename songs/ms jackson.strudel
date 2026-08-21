@@ -1,39 +1,94 @@
 setcpm(95/4)
-//all(x => x.scope({ color: '#ffffff22', thickness: 1, scale: 0.05 }))
-// VOCAL
-$: note("<[~ ~ ~ a4 e5 d5 d5 d5 ~ e5 ~ ~ a5@4] [e5 ~ e5 ~ e5 ~ g5@3 f5 e5 ~ ~ ~ ~ ~] [d5 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~] [a4 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~]>")
-  .sound("sawtooth").gain(.8).clip(.7).release(.5).lpf(2100).room(.2).size(2).color("#ff8844").delay(.3)
-  ._spiral({ stretch: 0.5, size: 100, thickness: 30, steady: 0, fade: 0.001, colorizeInactive: 0 })
-// BASS
-$: stack(
-   note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a2 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
-     .sound("sine").gain(.2).lpf(150).clip(.9).release(0.1),
-   note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a1 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
-     .sound("square").gain(.2).lpf(sine.range(180,350).slow(8)).lpq(4).clip(.5).release(.1).shape(0.9).postgain(0.3)).color("dodgerblue")
-  ._scope()
-// ORGAN
-$: stack(
+
+// @section Intro | 0-8
+// @section Verse 1 | 8-24
+// @section Lift | 24-32
+// @section Hook | 32-48
+// @section Breakdown | 48-52
+// @section Final hook | 52-60
+// @section Outro | 60-64
+
+const vocalPhrase = note("<[~ ~ ~ a4 e5 d5 d5 d5 ~ e5 ~ ~ a5@4] [e5 ~ e5 ~ e5 ~ g5@3 f5 e5 ~ ~ ~ ~ ~] [d5 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~] [a4 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~]>")
+  .sound("vox").gain(.62).release(.8).lpf(2400).room(.32).size(3).delay(".22:.15:.28")
+
+const bassPhrase = stack(
+  note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a2 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
+    .sound("sine").gain(.2).lpf(150).clip(.82).release(.1),
+  note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a1 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
+    .sound("square").gain(.15).lpf(sine.range(180,350).slow(8)).lpq(4).clip(.5).release(.1).shape(.65).postgain(.3)
+)
+
+const organPhrase = stack(
   note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
-    .sound("sawtooth").release(0.1).gain(.3).lpf(perlin.range(1000,1100)).lpq(2).vib("5:.12").room(.4).size(4)
+    .sound("sawtooth").release(.16).gain(.22).lpf(perlin.range(900,1120)).lpq(2).vib("5:.1").room(.38).size(4).pan(.38)
     .superimpose(x => x.add(note(.08))),
   note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
-    .sound("sawtooth").release(0.1).gain(.3).lpf(perlin.range(1100,1200).slow(4)).lpq(2).vib("4.5:.1").shape(.15).postgain(.5).room(0.8).size(5)
-    .superimpose(x => x.add(note(-.12)).delay(".3:.12:.5"))).color("magenta")
+    .sound("sawtooth").release(.18).gain(.18).lpf(perlin.range(1050,1260).slow(4)).lpq(2).vib("4.5:.08").shape(.12).postgain(.5).room(.55).size(5).pan(.62)
+    .superimpose(x => x.add(note(-.12)).delay(".3:.12:.5"))
+)
 
-// STABS
-$: stack(
-  note("<[[f4,a4,c5] ~@15] ~ [[a4,c5,e5] ~ ~ ~ [a4,c5,e5] ~ ~ [a4,c5,e5] [a4,c5,e5] ~@7] [[g4,b4,d5] ~ ~ ~ [g4,b4,d5] ~ ~ [g4,b4,d5] [g4,b4,d5] ~@7]>"),
-  note("<[[f5,a5,c6] ~@15] ~ [[a5,c6,e6] ~ ~ ~ [a5,c6,e6] ~ ~ [a5,c6,e6] [a5,c6,e6] ~@7] [[g5,b5,d6] ~ ~ ~ [g5,b5,d6] ~ ~ [g5,b5,d6] [g5,b5,d6] ~@7]>")
-).sound("piano").gain(.8).clip(.5).release(.7).room(.8).size(7).color("cyan")
+const stabsPhrase = stack(
+  note("<[[f4,a4,c5] ~@15] ~ [[a4,c5,e5] ~ ~ ~ [a4,c5,e5] ~ ~ [a4,c5,e5] [a4,c5,e5] ~@7] [[g4,b4,d5] ~ ~ ~ [g4,b4,d5] ~ ~ [g4,b4,d5] [g4,b4,d5] ~@7]>").gain(.48),
+  note("<[[f5,a5,c6] ~@15] ~ [[a5,c6,e6] ~ ~ ~ [a5,c6,e6] ~ ~ [a5,c6,e6] [a5,c6,e6] ~@7] [[g5,b5,d6] ~ ~ ~ [g5,b5,d6] ~ ~ [g5,b5,d6] [g5,b5,d6] ~@7]>").gain(.3)
+).sound("piano").hpf(180).clip(.55).release(.65).room(.32).size(5)
 
-// RUNS
-$: stack(
-  note("<[d5 ~@11] ~ ~ [~@6 c6 b5 a5 g5 f5 e5]>").gain(.9),
+const runFill = stack(
+  note("[~@6 c6 b5 a5 g5 f5 e5]").gain(.55),
+  note("[~@6 c7 b6 a6 g6 f6 e6]").gain(.32)
+).sound("piano").clip(.5).release(.35).delay(".2:.15:.35").room(.28).size(4)
 
-  note("<[d6 ~@11] ~ ~ [~@6 c7 b6 a6 g6 f6 e6]>").gain(.7)
-).sound("piano").clip(.5).release(.4).delay(".2:.15:.4").room(.3).size(5).color("white")
+const kickPhrase = s("bd").struct("t ~ ~ ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~ ~ ~").bank("RolandTR909").gain(.22).shape(.35).release(.8).room(.06)
+const snarePhrase = s("sd").struct("~ ~ ~ ~ t ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~").bank("RolandTR909").gain(.38).room(.16).size(2)
+const hatsPhrase = s("hh*8").bank("RolandTR909").gain("[.16 .24]*4").clip(sine.range(.04,.06).fast(2)).shape(.08).hpf(5200)
 
-// DRUMS
-$: s("bd").struct("t ~ ~ ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~ ~ ~").bank("RolandTR909").gain(0.2).shape(0.4).release(1).room(.1).color("red")
-$: s("sd").struct("~ ~ ~ ~ t ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~").bank("RolandTR909").gain(0.5).room(.2).size(2).color("yellow")
-$: s("hh*8").gain("[.25 .35]*4").clip(sine.range(.04,.06).fast(2)).shape(.1).color("lime")
+// @track vocal | Vocal
+vocal$: arrange(
+  [8, silence], [16, vocalPhrase.velocity(.72)], [8, vocalPhrase.velocity(.84)],
+  [16, vocalPhrase], [4, silence], [8, vocalPhrase], [4, silence]
+).orbit(1).color("#ff8844")._spiral({ stretch: .5, size: 100, thickness: 24, steady: 0, fade: .001, colorizeInactive: 0 })
+
+// @track bass | Bass
+bass$: arrange(
+  [4, silence], [4, bassPhrase.velocity(.5)], [16, bassPhrase.velocity(.78)],
+  [8, bassPhrase.velocity(.9)], [16, bassPhrase], [4, silence],
+  [8, bassPhrase], [4, bassPhrase.velocity(.5)]
+).orbit(2).color("dodgerblue")._scope()
+
+// @track organ | Organ
+organ$: arrange(
+  [8, organPhrase.lpf(650).velocity(.55)], [16, organPhrase.velocity(.68)],
+  [8, organPhrase.velocity(.82)], [16, organPhrase], [4, silence],
+  [8, organPhrase], [4, organPhrase.lpf(650).velocity(.48)]
+).orbit(3).color("magenta")._lissajous({ size: 150 })
+
+// @track stabs | Piano stabs
+stabs$: arrange(
+  [24, silence], [8, stabsPhrase.velocity(.72)], [16, stabsPhrase],
+  [4, silence], [8, stabsPhrase.velocity(.9)], [4, silence]
+).orbit(4).color("cyan")
+
+// @track runs | Piano runs
+runs$: arrange(
+  [31, silence], [1, runFill], [15, silence], [1, runFill],
+  [11, silence], [1, runFill], [4, silence]
+).orbit(5).color("white")
+
+// @track kick | Kick
+kick$: arrange(
+  [8, kickPhrase.velocity(.55)], [16, kickPhrase.velocity(.76)],
+  [8, kickPhrase.velocity(.9)], [16, kickPhrase], [4, kickPhrase.fast(2).velocity(.52)],
+  [8, kickPhrase], [4, silence]
+).orbit(6).color("red")._orbit({ size: 130 })
+
+// @track snare | Snare
+snare$: arrange(
+  [8, silence], [16, snarePhrase.velocity(.76)], [8, snarePhrase.velocity(.9)],
+  [16, snarePhrase], [4, snarePhrase.velocity(.55)], [8, snarePhrase], [4, silence]
+).orbit(7).color("yellow")
+
+// @track hats | Hats
+hats$: arrange(
+  [8, hatsPhrase.velocity(.45)], [16, hatsPhrase.velocity(.72)],
+  [8, hatsPhrase.velocity(.9)], [16, hatsPhrase], [4, hatsPhrase.slow(2).velocity(.42)],
+  [8, hatsPhrase], [4, silence]
+).orbit(8).color("lime")

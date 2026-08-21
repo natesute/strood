@@ -26,6 +26,38 @@ test('opens the searchable song browser and patch module palette', async ({ page
   await page.getByRole('button', { name: 'add module' }).click();
   await expect(page.getByRole('dialog', { name: 'Add synth module' })).toBeVisible();
   await expect(page.getByRole('searchbox', { name: 'Find a synth module' })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'vocal voice' })).toBeVisible();
+});
+
+test('mixes tracks at runtime and persists workspace controls without rewriting code', async ({ page }) => {
+  await page.goto('/');
+  const editor = page.getByRole('textbox', { name: 'Song code', exact: true });
+  const before = await editor.textContent();
+  const vocalGain = page.getByRole('slider', { name: 'Vocal gain' });
+  await vocalGain.fill('0.55');
+  await expect(page.getByText('line 45 · 55%')).toBeVisible();
+  await page.getByRole('button', { name: 'Mute Vocal' }).click();
+  await expect(page.getByRole('button', { name: 'Unmute Vocal' })).toBeVisible();
+  expect(await editor.textContent()).toBe(before);
+
+  await page.getByRole('button', { name: 'Collapse track rail' }).click();
+  await expect(page.getByRole('complementary', { name: 'Song tracks' })).toBeHidden();
+  await page.getByRole('button', { name: 'Tracks' }).click();
+  await expect(page.getByRole('complementary', { name: 'Song tracks' })).toBeVisible();
+
+  await page.getByRole('combobox', { name: 'Visualiser placement' }).selectOption('dock');
+  await expect(page.locator('body')).toHaveAttribute('data-visualizers', 'dock');
+});
+
+test('uses keyboard-safe app dialogs instead of native prompts', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New' }).click();
+  await page.getByRole('button', { name: 'Save' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Save song' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('textbox', { name: 'Song name' })).toBeFocused();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).toBeHidden();
 });
 
 test('uses linked editor views for multi-column mode', async ({ page }) => {
@@ -40,7 +72,7 @@ test('uses linked editor views for multi-column mode', async ({ page }) => {
   await page.keyboard.press('Control+Home');
   await page.keyboard.type('// linked view check\n');
   await secondEditor.click();
-  await page.keyboard.press('Control+Home');
+  await page.keyboard.press('Meta+ArrowUp');
   await expect(secondEditor).toContainText('// linked view check');
 });
 

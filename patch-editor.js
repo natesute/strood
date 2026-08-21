@@ -1,8 +1,9 @@
 // Patch Editor — free-form node graph with draggable modules and visual wiring
-import { registerPatch, listModules, getModuleFactory } from './synth-modules/index.mjs';
+import { registerPatch, listModules, getModuleFactory, listPatchMacros, insertPatchMacro } from './synth-modules/index.mjs';
 import { superdough, getAudioContext } from 'superdough';
 import { listPatches, readPatch, writePatch } from './src/api.js';
 import { showToast, trapFocus } from './src/ui.js';
+import { confirmDialog, promptDialog } from './src/dialogs.js';
 
 let overlayEl = null;
 let patchDef = null;
@@ -869,6 +870,14 @@ function addModule(module, graphX, graphY) {
   closeContextMenu();
 }
 
+function addMacro(macro, graphX, graphY) {
+  insertPatchMacro(patchDef, macro.id, { x: graphX, y: graphY }, nextId);
+  commitPatch();
+  renderAll();
+  closeContextMenu();
+  showToast(`Added ${macro.name} subgraph`);
+}
+
 function showContextMenu(x, y, graphX, graphY) {
   closeContextMenu();
   const menu = document.createElement('div');
@@ -878,6 +887,7 @@ function showContextMenu(x, y, graphX, graphY) {
   menu.setAttribute('aria-label', 'Add synth module');
 
   const modules = listModules();
+  const macros = listPatchMacros();
   const search = document.createElement('input');
   search.className = 'pe-menu-search';
   search.type = 'search';
@@ -888,6 +898,20 @@ function showContextMenu(x, y, graphX, graphY) {
 
   const renderModules = (query = '') => {
     results.replaceChildren();
+    const matchingMacros = macros.filter((macro) => macro.name.includes(query.toLowerCase()));
+    if (matchingMacros.length) {
+      const macroHeading = document.createElement('div');
+      macroHeading.className = 'pe-menu-cat'; macroHeading.textContent = 'subgraphs';
+      results.appendChild(macroHeading);
+      matchingMacros.forEach((macro) => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'pe-menu-item pe-menu-macro';
+        item.textContent = macro.name;
+        item.onclick = () => addMacro(macro, graphX, graphY);
+        results.appendChild(item);
+      });
+    }
     const filtered = modules.filter((module) => module.type.toLowerCase().includes(query.toLowerCase()));
     const cats = {};
     filtered.forEach((module) => (cats[module.category || 'other'] = cats[module.category || 'other'] || []).push(module));
@@ -1075,7 +1099,12 @@ async function loadPatchList(selectEl) {
 }
 
 async function loadPatch(name) {
-  if (patchDirty && currentPatchName && name !== currentPatchName && !confirm(`Discard unsaved changes to “${currentPatchName}”?`)) {
+  if (patchDirty && currentPatchName && name !== currentPatchName && !(await confirmDialog({
+    title: 'Discard patch changes?',
+    message: `Discard unsaved changes to “${currentPatchName}”?`,
+    confirmLabel: 'Discard',
+    danger: true,
+  }))) {
     const select = overlayEl?.querySelector('.pe-select');
     if (select) select.value = currentPatchName;
     return;
@@ -1108,7 +1137,7 @@ async function savePatch() {
 }
 
 async function saveAsPatch() {
-  const name = prompt('Patch name:');
+  const name = await promptDialog({ title: 'Save patch as', label: 'Patch name', confirmLabel: 'Save' });
   if (!name) return;
   patchDef.name = name; currentPatchName = name;
   await savePatch();
@@ -1197,17 +1226,31 @@ function createKeyboard() {
 }
 
 // ── Public API ───────────────────────────────────────────
-export function showPatchEditor() {
-  if (overlayEl && !closePatchEditor()) return;
+export async function showPatchEditor() {
+  if (overlayEl && !(await closePatchEditor())) return;
   previousFocus = document.activeElement;
   overlayEl = buildOverlay();
   document.body.appendChild(overlayEl);
   overlayEl.focus();
 }
 
-export function closePatchEditor() {
+export async function closePatchEditor() {
   if (overlayEl) {
-    if (patchDirty && !confirm(`Discard unsaved changes to “${currentPatchName || 'this patch'}”?`)) return false;
+    if (patchDirty) {
+      if (!(await confirmDialog({
+        title: 'Discard patch changes?',
+        message: `Discard unsaved changes to “${currentPatchName || 'this patch'}”?`,
+        confirmLabel: 'Discard',
+        danger: true,
+      }))) return false;
+      clearTimeout(commitTimeout);
+      clearTimeout(historyTimeout);
+      try {
+        patchDef = await readPatch(currentPatchName);
+        registerPatch(currentPatchName, patchDef);
+      } catch {}
+      setPatchDirty(false);
+    }
     closeContextMenu();
     overlayEl.remove();
     overlayEl = null;
@@ -1218,7 +1261,7 @@ export function closePatchEditor() {
   return true;
 }
 
-export function togglePatchEditor() {
-  if (overlayEl) closePatchEditor();
-  else showPatchEditor();
+export async function togglePatchEditor() {
+  if (overlayEl) return closePatchEditor();
+  return showPatchEditor();
 }

@@ -1,5 +1,11 @@
 const TRACK_COLOURS = ['#56d4dd', '#f07178', '#e6b450', '#7ee787', '#c792ea', '#ff9e64', '#82aaff'];
 const MASTER_GAIN_MARKER = '// strood-track-gain';
+const TRACK_START = /^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\$|\$):/;
+const TRACK_DIRECTIVE = /^\/\/\s*@track\s+([A-Za-z0-9_-]+)(?:\s*\|\s*(.+))?$/i;
+
+function slug(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'track';
+}
 
 export function parseTracks(code) {
   const lines = code.split('\n');
@@ -9,7 +15,7 @@ export function parseTracks(code) {
 
   const starts = [];
   lines.forEach((line, index) => {
-    if (line.trimStart().startsWith('$:')) starts.push(index);
+    if (TRACK_START.test(line)) starts.push(index);
   });
 
   return starts.map((lineIndex, index) => {
@@ -17,31 +23,63 @@ export function parseTracks(code) {
     let endLine = nextTrackLine;
     if (nextTrackLine < lines.length) {
       while (endLine > lineIndex + 1 && !lines[endLine - 1].trim()) endLine--;
-      if (/^\/\/\s*[A-Za-z][A-Za-z0-9 _-]*$/.test(lines[endLine - 1]?.trim() || '')) endLine--;
+      const possibleHeader = lines[endLine - 1]?.trim() || '';
+      if (/^\/\/\s*[A-Za-z][A-Za-z0-9 _-]*$/.test(possibleHeader) || TRACK_DIRECTIVE.test(possibleHeader)) endLine--;
       while (endLine > lineIndex + 1 && !lines[endLine - 1].trim()) endLine--;
     }
     let label = '';
+    let explicitKey = '';
     for (let cursor = lineIndex - 1; cursor >= 0; cursor--) {
       const text = lines[cursor].trim();
       if (!text) continue;
+      const directive = text.match(TRACK_DIRECTIVE);
+      if (directive) {
+        explicitKey = directive[1];
+        label = directive[2]?.trim() || directive[1].replace(/[-_]/g, ' ');
+        break;
+      }
       const match = text.match(/^\/\/\s*([A-Za-z][A-Za-z0-9 _-]*)$/);
       if (match) label = match[1].trim();
       break;
     }
     const block = lines.slice(lineIndex, endLine).join('\n').replace(/\n+$/, '');
     const gainMatch = block.match(/\)\.gain\((\d*\.?\d+)\)\s*\/\/ strood-track-gain\s*$/);
+    const sourceLabel = lines[lineIndex].match(TRACK_START)?.[1];
+    const name = label || sourceLabel || `Track ${index + 1}`;
+    const orbitMatch = block.match(/\.orbit\(\s*(\d+)\s*\)/);
     return {
       id: `${index}-${lineIndex}`,
+      key: explicitKey || slug(sourceLabel || name),
       index,
-      name: label || `Track ${index + 1}`,
+      name,
       line: lineIndex + 1,
       start: offsets[lineIndex],
       end: endLine < lines.length ? offsets[endLine] : code.length,
+      orbit: orbitMatch ? Number(orbitMatch[1]) : index + 1,
       gain: gainMatch ? Number(gainMatch[1]) : 1,
       muted: gainMatch ? Number(gainMatch[1]) === 0 : false,
       colour: TRACK_COLOURS[index % TRACK_COLOURS.length],
     };
   });
+}
+
+export function routeTracksForPlayback(code) {
+  let routed = code;
+  const tracks = parseTracks(code);
+  for (const track of [...tracks].reverse()) {
+    const original = routed.slice(track.start, track.end);
+    if (/\.orbit\(\s*\d+\s*\)/.test(original)) continue;
+    const trailing = original.match(/\s*$/)?.[0] || '';
+    let body = original.slice(0, original.length - trailing.length);
+    let suffix = '';
+    if (body.endsWith(';')) {
+      body = body.slice(0, -1);
+      suffix = ';';
+    }
+    const replacement = `${body}.orbit(${track.orbit})${suffix}${trailing}`;
+    routed = routed.slice(0, track.start) + replacement + routed.slice(track.end);
+  }
+  return routed;
 }
 
 export function setTrackGain(code, trackIndex, gain) {

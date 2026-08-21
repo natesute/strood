@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseTracks, setTrackGain } from '../src/tracks.js';
+import { parseTracks, routeTracksForPlayback, setTrackGain } from '../src/tracks.js';
 
 const song = `setcpm(120/4)
 // BASS
@@ -26,5 +26,17 @@ describe('track parsing', () => {
     const muted = setTrackGain(lowered, 0, 0);
     expect(parseTracks(muted)[0].muted).toBe(true);
     expect(muted.match(/strood-track-gain/g)).toHaveLength(1);
+  });
+
+  it('uses named pattern labels, explicit track metadata, and stable playback orbits', () => {
+    const named = `// @track lead | Lead voice\nlead$: note("c4")\n\nbass$: note("c2").orbit(7)`;
+    const tracks = parseTracks(named);
+    expect(tracks.map(({ key, name, orbit }) => ({ key, name, orbit }))).toEqual([
+      { key: 'lead', name: 'Lead voice', orbit: 1 },
+      { key: 'bass', name: 'bass', orbit: 7 },
+    ]);
+    const routed = routeTracksForPlayback(named);
+    expect(routed).toContain('lead$: note("c4").orbit(1)');
+    expect(routed.match(/\.orbit\(7\)/g)).toHaveLength(1);
   });
 });

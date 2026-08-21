@@ -6,13 +6,6 @@ import {
   registerSynthSounds,
   samples,
 } from '@strudel/webaudio';
-import { registerPatch, initModularSynth } from './synth-modules/index.mjs';
-import { togglePatchEditor } from './patch-editor.js';
-import initPatch from './synth-modules/patches/init.json';
-import acidPatch from './synth-modules/patches/acid-bass.json';
-import lushPatch from './synth-modules/patches/lush-pad.json';
-import glitchPatch from './synth-modules/patches/glitch-pluck.json';
-import voxPatch from './synth-modules/patches/vox-pad.json';
 import { transpiler } from '@strudel/transpiler';
 import { evalScope } from '@strudel/core';
 import { toggleLineComment } from '@codemirror/commands';
@@ -20,7 +13,6 @@ import { Prec, StateField, StateEffect } from '@codemirror/state';
 import { EditorView, Decoration } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
-import { getAnalyzerData } from 'superdough';
 import {
   ApiError,
   listSongs,
@@ -32,52 +24,17 @@ import {
   readSongHistory,
 } from './src/api.js';
 import { saveRecoverySnapshot, listRecoverySnapshots, clearRecoverySnapshots } from './src/recovery.js';
-import { parseTracks, setTrackGain } from './src/tracks.js';
+import { parseTracks, routeTracksForPlayback } from './src/tracks.js';
+import { ensureMasterEngine, getMasterGain, readMasterMeter, setMasterGain } from './src/audio-engine.js';
+import { RuntimeMixer } from './src/mixer.js';
+import { parseSections, sectionAtCycle, nextCycleTiming } from './src/song-metadata.js';
+import { loadSamplePacks } from './src/sample-loader.js';
+import { choiceDialog, confirmDialog, promptDialog } from './src/dialogs.js';
+import { createVisualizerModeController } from './src/visualizer-modes.js';
+import { openPatchEditor, prepareOptionalSystems } from './src/optional-systems.js';
 import { describeError, inferErrorLine, showToast, trapFocus } from './src/ui.js';
-import './visualizers.js';
+import initialSongCode from './songs/ms jackson.strudel?raw';
 
-const songCode = `setcpm(95/4)
-//all(x => x.scope({ color: '#ffffff22', thickness: 1, scale: 0.05 }))
-// VOCAL
-$: note("<[~ ~ ~ a4 e5 d5 d5 d5 ~ e5 ~ ~ a5@4] [e5 ~ e5 ~ e5 ~ g5@3 f5 e5 ~ ~ ~ ~ ~] [d5 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~] [a4 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~]>")
-  .sound("sawtooth").gain(.8).clip(.7).release(.5).lpf(2100).room(.2).size(2).color("#ff8844").delay(.3)
-  ._spiral({ stretch: 0.5, size: 200, thickness: 30, steady: 0, fade: 0.001, colorizeInactive: 0 })
-// BASS
-$: stack(
-   note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a2 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
-     .sound("sine").gain(.2).lpf(150).clip(.9).release(0.1),
-   note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a1 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
-     .sound("square").gain(.2).lpf(sine.range(180,350).slow(8)).lpq(4).clip(.5).release(.1).shape(0.9).postgain(0.3)
- ).color("dodgerblue")._scope()
-// ORGAN
-$: stack(
-  note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
-    .sound("sawtooth").release(0.1).gain(.3).lpf(perlin.range(1000,1100)).lpq(2).vib("5:.12").room(.4).size(4)
-    .superimpose(x => x.add(note(.08))),
-  note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
-    .sound("sawtooth").release(0.1).gain(.3).lpf(perlin.range(1100,1200).slow(4)).lpq(2).vib("4.5:.1").shape(.15).postgain(.5).room(0.8).size(5)
-    .superimpose(x => x.add(note(-.12)).delay(".3:.12:.5"))
-).color("magenta")._lissajous({ size: 200 })
-
-// STABS
-$: stack(
-  note("<[[f4,a4,c5] ~@15] ~ [[a4,c5,e5] ~ ~ ~ [a4,c5,e5] ~ ~ [a4,c5,e5] [a4,c5,e5] ~@7] [[g4,b4,d5] ~ ~ ~ [g4,b4,d5] ~ ~ [g4,b4,d5] [g4,b4,d5] ~@7]>"),
-  note("<[[f5,a5,c6] ~@15] ~ [[a5,c6,e6] ~ ~ ~ [a5,c6,e6] ~ ~ [a5,c6,e6] [a5,c6,e6] ~@7] [[g5,b5,d6] ~ ~ ~ [g5,b5,d6] ~ ~ [g5,b5,d6] [g5,b5,d6] ~@7]>")
-).sound("piano").gain(.8).clip(.5).release(.7).room(.8).size(7).color("cyan")
-
-// RUNS
-$: stack(
-  note("<[d5 ~@11] ~ ~ [~@6 c6 b5 a5 g5 f5 e5]>").gain(.9),
-
-  note("<[d6 ~@11] ~ ~ [~@6 c7 b6 a6 g6 f6 e6]>").gain(.7)
-).sound("piano").clip(.5).release(.4).delay(".2:.15:.4").room(.3).size(5).color("white")
-
-// DRUMS
-$: s("bd").struct("t ~ ~ ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~ ~ ~").bank("RolandTR909").gain(0.2).shape(0.4).release(1).room(.1).color("red")._orbit({ size: 150 })
-$: s("sd").struct("~ ~ ~ ~ t ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~").bank("RolandTR909").gain(0.5).room(.2).size(2).color("yellow")
-$: s("hh*8").gain("[.25 .35]*4").clip(sine.range(.04,.06).fast(2)).shape(.1).color("lime")`;
-
-/* ── Shared state ────────────────────────────────────────── */
 const editorsContainer = document.getElementById('editors-container');
 const secondaryEditors = [];
 let lastEvalCode = ''; // last evaluated combined code, for location analysis
@@ -90,6 +47,10 @@ let lastSavedCode = '';
 let documentDirty = false;
 let pendingExternalUpdate = null;
 let recoveryTimer = 0;
+const mixer = new RuntimeMixer();
+let currentSections = [];
+let queuedUpdateTimer = 0;
+let queuedTargetCycle = null;
 
 let _saveTimer = 0;
 function debouncedSave() {
@@ -183,7 +144,12 @@ const bootStatusEl = document.getElementById('boot-status');
 const diagnosticsEl = document.getElementById('diagnostics');
 const diagnosticMessageEl = document.getElementById('diagnostic-message');
 const masterLevelEl = document.getElementById('master-level');
+const masterPeakEl = document.getElementById('master-peak');
+const masterVolumeEl = document.getElementById('master-volume');
 const limiterStateEl = document.getElementById('limiter-state');
+const cycleStatusEl = document.getElementById('cycle-status');
+const sectionStatusEl = document.getElementById('section-status');
+const queueStatusEl = document.getElementById('queue-status');
 let isPlaying = false;
 let currentCols = 1;
 
@@ -192,6 +158,7 @@ function updateMode() {
   modeEl.className = isPlaying ? 'playing' : 'stopped';
   runBtn.classList.toggle('playing', isPlaying);
   runBtn.querySelector('span').textContent = isPlaying ? 'Update' : 'Run';
+  if (!isPlaying) clearQueuedUpdate();
 }
 
 function setSaveState(label, state = '') {
@@ -253,9 +220,6 @@ function updateDirtyCount() {
 // Dirty count updated on change via listener (see below), not polled
 
 /* ── Prebake ────────────────────────────────────────────── */
-const CDN = 'https://strudel.b-cdn.net';
-let samplePacksPromise = null;
-
 async function prebake() {
   initAudioOnFirstClick();
   bootStatusEl.textContent = 'Preparing audio engine…';
@@ -268,27 +232,14 @@ async function prebake() {
     import('@strudel/webaudio'),
   );
   await registerSynthSounds();
-
-  await initModularSynth();
-  registerPatch('init', initPatch);
-  registerPatch('acid', acidPatch);
-  registerPatch('lush', lushPatch);
-  registerPatch('glitch', glitchPatch);
-  registerPatch('vox', voxPatch);
-
-  bootStatusEl.textContent = 'Synths ready · loading samples…';
-  if (!samplePacksPromise) {
-    samplePacksPromise = Promise.allSettled([
-      samples(`${CDN}/piano.json`, `${CDN}/piano/`, { prebake: true }),
-      samples(`${CDN}/tidal-drum-machines.json`, `${CDN}/tidal-drum-machines/machines/`, { prebake: true }),
-      samples('github:tidalcycles/dirt-samples'),
-    ]).then((results) => {
-      const failed = results.filter((result) => result.status === 'rejected').length;
-      bootStatusEl.textContent = failed ? `Synths ready · ${failed} sample pack${failed === 1 ? '' : 's'} unavailable` : 'Audio ready';
-      if (failed) showToast('Some remote samples are unavailable. Built-in synths still work.');
-      return results;
-    });
-  }
+  await prepareOptionalSystems(getAllCode());
+  ensureMasterEngine();
+  bootStatusEl.textContent = 'Synths ready · loading required samples…';
+  const result = await loadSamplePacks(getAllCode(), samples);
+  bootStatusEl.textContent = result.failed
+    ? `Audio ready · ${result.failed} sample pack${result.failed === 1 ? '' : 's'} unavailable`
+    : 'Audio ready';
+  if (result.failed) showToast('Some remote samples are unavailable. Built-in synths still work.');
 }
 
 /* ── StrudelMirror ──────────────────────────────────────── */
@@ -297,7 +248,7 @@ const editor = new StrudelMirror({
   defaultOutput: webaudioOutput,
   getTime: () => getAudioContext().currentTime,
   transpiler,
-  initialCode: localStorage.getItem('strudel_code') ?? songCode,
+  initialCode: localStorage.getItem('strudel_code') ?? initialSongCode,
   drawTime: [-2, 2],
   prebake,
   onUpdateState: (state) => {
@@ -450,21 +401,56 @@ function clearAllDirtyLines() {
   });
 }
 
-async function evaluateAll(autostart = true) {
-  const allCode = getAllCode();
+function clearQueuedUpdate() {
+  if (queuedUpdateTimer) window.clearTimeout(queuedUpdateTimer);
+  queuedUpdateTimer = 0;
+  queuedTargetCycle = null;
+  queueStatusEl.textContent = '';
+}
+
+async function performEvaluation(allCode, autostart) {
   lastEvalCode = allCode;
   clearDiagnostic();
-  saveRecoverySnapshot(currentSongName, allCode, 'run');
   editor.flash();
   try {
-    const performanceCode = `${allCode}\nall(x => x.analyze("strood-master").compressor(-8))`;
+    await prepareOptionalSystems(allCode);
+    ensureMasterEngine();
+    await loadSamplePacks(allCode, samples);
+    const performanceCode = routeTracksForPlayback(allCode);
     await editor.repl.evaluate(performanceCode, autostart);
+    const tracks = parseTracks(allCode);
+    mixer.sync(tracks);
+    currentSections = parseSections(allCode);
     clearAllDirtyLines();
     updateDocumentState();
+    renderTracks();
   } catch (error) {
     showDiagnostic(error);
     throw error;
   }
+}
+
+async function evaluateAll(autostart = true, { immediate = false } = {}) {
+  const allCode = getAllCode();
+  saveRecoverySnapshot(currentSongName, allCode, 'run');
+  if (isPlaying && !immediate) {
+    const scheduler = editor.repl.scheduler;
+    const now = Number(scheduler.now());
+    const cps = Number(scheduler.cps) || 1;
+    const timing = nextCycleTiming(now, cps, -12);
+    clearQueuedUpdate();
+    queuedTargetCycle = timing.targetCycle;
+    queueStatusEl.textContent = `queued · cycle ${queuedTargetCycle + 1}`;
+    queuedUpdateTimer = window.setTimeout(() => {
+      queuedUpdateTimer = 0;
+      queuedTargetCycle = null;
+      queueStatusEl.textContent = '';
+      performEvaluation(allCode, autostart).catch(() => {});
+    }, timing.milliseconds);
+    return;
+  }
+  clearQueuedUpdate();
+  await performEvaluation(allCode, autostart);
 }
 
 function allEditorViews() {
@@ -560,9 +546,7 @@ function setColumnCount(n) {
 const trackListEl = document.getElementById('track-list');
 const trackEmptyEl = document.getElementById('track-empty');
 const trackCountEl = document.getElementById('track-count');
-const mutedTrackGains = new Map();
-let soloTrackIndex = null;
-let soloRestoreGains = null;
+const trackMeterEls = new Map();
 
 function focusTrack(track) {
   editor.editor.dispatch({
@@ -572,52 +556,30 @@ function focusTrack(track) {
   editor.editor.focus();
 }
 
-function applyTrackGain(trackIndex, gain) {
-  const nextCode = setTrackGain(getAllCode(), trackIndex, gain);
-  replaceAllCode(nextCode);
+function toggleTrackMute(track) {
+  const state = mixer.stateFor(track);
+  mixer.update(track, { muted: !state.muted });
   renderTracks();
 }
 
-function toggleTrackMute(track) {
-  const key = `${track.index}:${track.name}`;
-  if (track.muted) {
-    applyTrackGain(track.index, mutedTrackGains.get(key) ?? 1);
-    mutedTrackGains.delete(key);
-  } else {
-    mutedTrackGains.set(key, track.gain || 1);
-    applyTrackGain(track.index, 0);
-  }
-}
-
 function toggleTrackSolo(track) {
-  let code = getAllCode();
-  const tracks = parseTracks(code);
-  if (soloTrackIndex === track.index && soloRestoreGains) {
-    soloRestoreGains.forEach((gain, index) => { code = setTrackGain(code, index, gain); });
-    soloTrackIndex = null;
-    soloRestoreGains = null;
-  } else {
-    if (soloRestoreGains) soloRestoreGains.forEach((gain, index) => { code = setTrackGain(code, index, gain); });
-    const restoredTracks = parseTracks(code);
-    soloRestoreGains = restoredTracks.map((item) => item.gain);
-    soloTrackIndex = track.index;
-    restoredTracks.forEach((item) => {
-      if (item.index !== track.index) code = setTrackGain(code, item.index, 0);
-    });
-  }
-  replaceAllCode(code);
+  const state = mixer.stateFor(track);
+  mixer.update(track, { solo: !state.solo });
   renderTracks();
 }
 
 function renderTracks() {
   const tracks = parseTracks(getAllCode());
+  mixer.sync(tracks);
   trackCountEl.textContent = String(tracks.length);
   trackEmptyEl.hidden = tracks.length > 0;
   trackListEl.replaceChildren();
+  trackMeterEls.clear();
 
   tracks.forEach((track) => {
+    const state = mixer.stateFor(track);
     const strip = document.createElement('section');
-    strip.className = `track-strip${track.muted ? ' muted' : ''}`;
+    strip.className = `track-strip${state.muted ? ' muted' : ''}${state.solo ? ' solo' : ''}`;
     strip.style.setProperty('--track-color', track.colour);
     strip.tabIndex = 0;
     strip.setAttribute('aria-label', `${track.name}, line ${track.line}`);
@@ -629,36 +591,101 @@ function renderTracks() {
     name.textContent = track.name;
     const meta = document.createElement('div');
     meta.className = 'track-meta';
-    meta.textContent = `line ${track.line} · ${Math.round(track.gain * 100)}%`;
+    meta.textContent = `line ${track.line} · ${Math.round(state.gain * 100)}%`;
+
+    const meter = document.createElement('div');
+    meter.className = 'track-meter';
+    meter.setAttribute('aria-hidden', 'true');
+    const meterFill = document.createElement('span');
+    meter.appendChild(meterFill);
+    trackMeterEls.set(track.key, { fill: meterFill, track });
 
     const controls = document.createElement('div');
     controls.className = 'track-controls';
     const mute = document.createElement('button');
     mute.type = 'button';
-    mute.className = `track-button${track.muted ? ' active' : ''}`;
+    mute.className = `track-button${state.muted ? ' active' : ''}`;
     mute.textContent = 'M';
-    mute.setAttribute('aria-label', `${track.muted ? 'Unmute' : 'Mute'} ${track.name}`);
+    mute.setAttribute('aria-label', `${state.muted ? 'Unmute' : 'Mute'} ${track.name}`);
     mute.addEventListener('click', (event) => { event.stopPropagation(); toggleTrackMute(track); });
 
     const solo = document.createElement('button');
     solo.type = 'button';
-    solo.className = `track-button${soloTrackIndex === track.index ? ' active' : ''}`;
+    solo.className = `track-button${state.solo ? ' active' : ''}`;
     solo.textContent = 'S';
-    solo.setAttribute('aria-label', `${soloTrackIndex === track.index ? 'Clear solo for' : 'Solo'} ${track.name}`);
+    solo.setAttribute('aria-label', `${state.solo ? 'Clear solo for' : 'Solo'} ${track.name}`);
     solo.addEventListener('click', (event) => { event.stopPropagation(); toggleTrackSolo(track); });
 
     const gain = document.createElement('input');
     gain.type = 'range';
     gain.className = 'track-gain';
-    gain.min = '0'; gain.max = '1.5'; gain.step = '0.05'; gain.value = String(track.gain);
+    gain.min = '0'; gain.max = '1.5'; gain.step = '0.05'; gain.value = String(state.gain);
     gain.setAttribute('aria-label', `${track.name} gain`);
     gain.addEventListener('click', (event) => event.stopPropagation());
-    gain.addEventListener('change', (event) => { event.stopPropagation(); applyTrackGain(track.index, event.target.value); });
+    gain.addEventListener('input', (event) => {
+      event.stopPropagation();
+      const next = Number(event.target.value);
+      mixer.update(track, { gain: next });
+      meta.textContent = `line ${track.line} · ${Math.round(next * 100)}%`;
+    });
     controls.append(mute, solo, gain);
-    strip.append(name, meta, controls);
+    strip.append(name, meta, meter, controls);
     trackListEl.appendChild(strip);
   });
 }
+
+const tracksButtonEl = document.getElementById('tracks-btn');
+const collapseTracksButtonEl = document.getElementById('collapse-tracks-btn');
+const railResizerEl = document.getElementById('rail-resizer');
+const savedRailWidth = Math.max(132, Math.min(340, Number(localStorage.getItem('strood_rail_width')) || 178));
+document.documentElement.style.setProperty('--rail-width', `${savedRailWidth}px`);
+
+function setTracksCollapsed(collapsed) {
+  document.body.classList.toggle('tracks-collapsed', collapsed);
+  tracksButtonEl.classList.toggle('active', !collapsed);
+  tracksButtonEl.setAttribute('aria-pressed', String(!collapsed));
+  collapseTracksButtonEl.setAttribute('aria-label', collapsed ? 'Expand track rail' : 'Collapse track rail');
+  collapseTracksButtonEl.textContent = collapsed ? '›' : '‹';
+  localStorage.setItem('strood_tracks_collapsed', String(collapsed));
+}
+
+setTracksCollapsed(localStorage.getItem('strood_tracks_collapsed') === 'true');
+tracksButtonEl.addEventListener('click', () => setTracksCollapsed(!document.body.classList.contains('tracks-collapsed')));
+collapseTracksButtonEl.addEventListener('click', () => setTracksCollapsed(true));
+
+function setRailWidth(value) {
+  const width = Math.max(132, Math.min(340, Number(value)));
+  document.documentElement.style.setProperty('--rail-width', `${width}px`);
+  railResizerEl.setAttribute('aria-valuenow', String(Math.round(width)));
+  localStorage.setItem('strood_rail_width', String(width));
+}
+
+railResizerEl.setAttribute('aria-valuemin', '132');
+railResizerEl.setAttribute('aria-valuemax', '340');
+railResizerEl.setAttribute('aria-valuenow', String(savedRailWidth));
+railResizerEl.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  railResizerEl.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => setRailWidth(moveEvent.clientX);
+  const stop = () => {
+    railResizerEl.removeEventListener('pointermove', move);
+    railResizerEl.removeEventListener('pointerup', stop);
+    railResizerEl.removeEventListener('pointercancel', stop);
+  };
+  railResizerEl.addEventListener('pointermove', move);
+  railResizerEl.addEventListener('pointerup', stop);
+  railResizerEl.addEventListener('pointercancel', stop);
+});
+railResizerEl.addEventListener('keydown', (event) => {
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+  event.preventDefault();
+  const current = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rail-width')) || savedRailWidth;
+  setRailWidth(current + (event.key === 'ArrowRight' ? 8 : -8));
+});
+
+createVisualizerModeController(document.getElementById('visualizer-mode'));
+masterVolumeEl.value = String(getMasterGain());
+masterVolumeEl.addEventListener('input', () => setMasterGain(masterVolumeEl.value));
 
 let meterFrame = 0;
 
@@ -667,18 +694,38 @@ function updateMasterMeter() {
     meterFrame = 0;
     return;
   }
-  let level = 0;
+  let meter = { rmsDb: -Infinity, peakDb: -Infinity, compressionDb: 0 };
   try {
-    const data = getAnalyzerData('time', 'strood-master');
-    if (data?.length) {
-      let sum = 0;
-      for (let index = 0; index < data.length; index++) sum += data[index] * data[index];
-      level = Math.min(1, Math.sqrt(sum / data.length) * 3.2);
-    }
+    meter = readMasterMeter();
   } catch (_) {}
+  const level = Math.max(0, Math.min(1, (meter.rmsDb + 60) / 60));
+  const peak = Math.max(0, Math.min(1, (meter.peakDb + 60) / 60));
   masterLevelEl.style.width = `${Math.round(level * 100)}%`;
-  limiterStateEl.textContent = level > 0.92 ? 'hot' : 'safe';
-  limiterStateEl.classList.toggle('hot', level > 0.92);
+  masterPeakEl.style.left = `${Math.round(peak * 100)}%`;
+  const hot = meter.peakDb > -1.1 || meter.compressionDb < -5;
+  limiterStateEl.textContent = hot ? `lim ${meter.compressionDb.toFixed(1)} dB` : 'safe';
+  limiterStateEl.classList.toggle('hot', hot);
+  for (const { fill, track } of trackMeterEls.values()) {
+    let trackDb = -Infinity;
+    try { trackDb = mixer.meterFor(track).rmsDb; } catch (_) {}
+    const trackLevel = Math.max(0, Math.min(1, (trackDb + 54) / 54));
+    fill.style.width = `${Math.round(trackLevel * 100)}%`;
+  }
+
+  if (isPlaying) {
+    try {
+      const cycle = Number(editor.repl.scheduler.now());
+      const cycleInSong = currentSections.length
+        ? ((Math.floor(cycle) % currentSections.at(-1).end) + currentSections.at(-1).end) % currentSections.at(-1).end
+        : Math.floor(cycle);
+      const section = sectionAtCycle(currentSections, cycle);
+      cycleStatusEl.textContent = `cycle ${cycleInSong + 1}`;
+      sectionStatusEl.textContent = section?.name || '';
+    } catch (_) {}
+  } else {
+    cycleStatusEl.textContent = 'cycle 1';
+    sectionStatusEl.textContent = currentSections[0]?.name || '';
+  }
   meterFrame = requestAnimationFrame(updateMasterMeter);
 }
 
@@ -1144,13 +1191,14 @@ async function onEditorKeydown(e) {
   // Ctrl+U — update live
   if (ctrl && e.key === 'u') {
     e.preventDefault();
-    evaluateAll(true).catch(() => {});
+    evaluateAll(true, { immediate: true }).catch(() => {});
     return;
   }
 
   // Ctrl+. — stop
   if (ctrl && e.key === '.') {
     e.preventDefault();
+    clearQueuedUpdate();
     editor.stop();
     return;
   }
@@ -1165,7 +1213,7 @@ async function onEditorKeydown(e) {
   // Ctrl+P — toggle patch editor
   if (ctrl && e.key === 'p') {
     e.preventDefault();
-    togglePatchEditor();
+    openPatchEditor().catch(showDiagnostic);
     return;
   }
 
@@ -1190,7 +1238,11 @@ function getAllCode() {
 }
 
 async function saveSong() {
-  const name = currentSongName || prompt('Song name:');
+  const name = currentSongName || await promptDialog({
+    title: 'Save song',
+    label: 'Song name',
+    confirmLabel: 'Save',
+  });
   if (!name) return;
   const code = getAllCode();
   setSaveState('Saving…');
@@ -1201,7 +1253,12 @@ async function saveSong() {
       result = await writeSong(name, code, currentSongName === name ? currentSongVersion : null);
     } catch (error) {
       if (!(error instanceof ApiError) || error.code !== 'version_conflict') throw error;
-      const overwrite = confirm('This song changed on disk after you opened it. Save your version over the disk copy? The disk copy will remain in recovery history.');
+      const overwrite = await confirmDialog({
+        title: 'Song changed on disk',
+        message: 'Save your version over the disk copy? The disk copy will remain in recovery history.',
+        confirmLabel: 'Save my version',
+        danger: true,
+      });
       if (!overwrite) {
         pendingExternalUpdate = { name };
         setSaveState('Conflict unresolved', 'failed');
@@ -1210,6 +1267,7 @@ async function saveSong() {
       result = await writeSong(name, code, null);
     }
     currentSongName = name;
+    mixer.setSong(name);
     currentSongVersion = result.version;
     lastSavedCode = code;
     pendingExternalUpdate = null;
@@ -1243,6 +1301,8 @@ function loadSong(code, name = null, version = null, savedCode = code) {
     localStorage.removeItem('strudel_song_name');
   }
   pendingExternalUpdate = null;
+  mixer.setSong(name);
+  currentSections = parseSections(code);
   clearDiagnostic();
   updateDocumentState();
   renderTracks();
@@ -1250,7 +1310,12 @@ function loadSong(code, name = null, version = null, savedCode = code) {
 }
 
 async function deleteSong(name) {
-  if (!confirm(`Move “${name}” to Strood’s recoverable trash?`)) return;
+  if (!(await confirmDialog({
+    title: 'Delete song',
+    message: `Move “${name}” to Strood’s recoverable trash?`,
+    confirmLabel: 'Move to trash',
+    danger: true,
+  }))) return;
   try {
     await removeSong(name);
     if (currentSongName === name) loadSong('', null, null, '');
@@ -1264,8 +1329,17 @@ let songBrowserPreviousFocus = null;
 
 async function prepareToReplaceCurrent(action) {
   if (!documentDirty) return true;
-  if (confirm(`Save changes to “${currentSongName || 'Untitled'}” before ${action}?`)) return Boolean(await saveSong());
-  return confirm('Discard the unsaved changes?');
+  const choice = await choiceDialog({
+    title: 'Unsaved changes',
+    message: `What should Strood do with changes to “${currentSongName || 'Untitled'}” before ${action}?`,
+    choices: [
+      { value: null, label: 'Cancel' },
+      { value: 'save', label: 'Save changes', primary: true },
+      { value: 'discard', label: 'Discard', danger: true },
+    ],
+  });
+  if (choice === 'save') return Boolean(await saveSong());
+  return choice === 'discard';
 }
 
 async function newSong() {
@@ -1408,13 +1482,23 @@ async function showSongBrowser() {
         actions.append(
           songAction('History', () => showHistory(panel, song.name, showList)),
           songAction('Duplicate', async () => {
-            const copyName = prompt('Duplicate name:', `${song.name} copy`);
+            const copyName = await promptDialog({
+              title: 'Duplicate song',
+              label: 'New song name',
+              value: `${song.name} copy`,
+              confirmLabel: 'Duplicate',
+            });
             if (!copyName) return;
             try { const source = await readSong(song.name); await writeSong(copyName, source.code); await showList(); }
             catch (error) { showDiagnostic(error); }
           }),
           songAction('Rename', async () => {
-            const nextName = prompt('New song name:', song.name);
+            const nextName = await promptDialog({
+              title: 'Rename song',
+              label: 'Song name',
+              value: song.name,
+              confirmLabel: 'Rename',
+            });
             if (!nextName || nextName === song.name) return;
             try {
               await renameSong(song.name, nextName);
@@ -1462,11 +1546,11 @@ editor.editor.contentDOM.setAttribute('aria-label', 'Song code');
 editor.editor.scrollDOM.tabIndex = 0;
 document.getElementById('diagnostic-close').addEventListener('click', clearDiagnostic);
 runBtn.addEventListener('click', () => evaluateAll().catch(() => {}));
-stopBtn.addEventListener('click', () => editor.stop());
+stopBtn.addEventListener('click', () => { clearQueuedUpdate(); editor.stop(); });
 document.getElementById('save-btn').addEventListener('click', saveSong);
 document.getElementById('open-btn').addEventListener('click', showSongBrowser);
 document.getElementById('new-btn').addEventListener('click', newSong);
-document.getElementById('patch-btn').addEventListener('click', togglePatchEditor);
+document.getElementById('patch-btn').addEventListener('click', () => openPatchEditor().catch(showDiagnostic));
 songNameEl.addEventListener('click', showSongBrowser);
 updateMode();
 renderTracks();
