@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Strood Font Preview — Experimental</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Xanh+Mono:ital@0;1&family=Syne+Mono&family=Martian+Mono:wght@400;700&family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Major+Mono+Display&family=Silkscreen&family=Pixelify+Sans:wght@400;700&family=Nova+Mono&family=Cutive+Mono&family=Overpass+Mono:wght@400;700&family=Fragment+Mono&family=Azeret+Mono:wght@400;700&family=Space+Grotesk:wght@400;700&family=Anybody:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #08080a;
+    color: #b3b1ad;
+    font-family: system-ui;
+    padding: 40px;
+  }
+  h1 {
+    font-family: system-ui;
+    font-size: 11px;
+    color: #3d4455;
+    text-transform: uppercase;
+    letter-spacing: 4px;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    font-family: system-ui;
+    font-size: 10px;
+    color: #2d333b;
+    margin-bottom: 40px;
+    letter-spacing: 1px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .card {
+    background: #0c0c10;
+    border: 1px solid #1a1a22;
+    border-radius: 2px;
+    padding: 20px 24px;
+    transition: border-color 0.3s, background 0.3s;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 3px;
+    height: 100%;
+    background: var(--accent, #e6b450);
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .card:hover {
+    border-color: #2a2a35;
+    background: #0e0e13;
+  }
+  .card:hover::before { opacity: 1; }
+  .card-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+  .card-label {
+    font-family: system-ui;
+    font-size: 10px;
+    color: var(--accent, #e6b450);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-weight: 600;
+  }
+  .card-tag {
+    font-family: system-ui;
+    font-size: 8px;
+    color: #0c0c10;
+    background: var(--accent, #e6b450);
+    padding: 2px 6px;
+    border-radius: 1px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-weight: 700;
+  }
+  .card-vibe {
+    font-family: system-ui;
+    font-size: 10px;
+    color: #2d333b;
+    margin-bottom: 16px;
+    letter-spacing: 0.5px;
+  }
+  .card pre {
+    font-size: 13px;
+    line-height: 1.7;
+    white-space: pre;
+    color: #b3b1ad;
+    overflow-x: auto;
+  }
+  .card pre .kw { color: #ff8f40; }
+  .card pre .str { color: #c2d94c; }
+  .card pre .num { color: #e6b450; }
+  .card pre .fn { color: #ffb454; }
+  .card pre .cm { color: #3d4455; font-style: italic; }
+  .card pre .op { color: #f29668; }
+  .card pre .punc { color: #5c6370; }
+
+  .card.wide { grid-column: span 2; }
+  .card.wide pre { font-size: 14px; }
+</style>
+</head>
+<body>
+
+<h1>Strood — Experimental Fonts</h1>
+<div class="subtitle">cassette punk / brutalist / futuristic / designer / anti-conventional</div>
+
+<div class="grid" id="grid"></div>
+
+<script>
+const sample = `<span class="cm">// ms jackson</span>
+<span class="fn">note</span>(<span class="str">"&lt;c3 eb3 g3 bb3&gt;"</span>)
+  .<span class="fn">s</span>(<span class="str">"sawtooth"</span>)
+  .<span class="fn">cutoff</span>(<span class="fn">sine</span>.<span class="fn">range</span>(<span class="num">200</span>, <span class="num">2000</span>).<span class="fn">slow</span>(<span class="num">8</span>))
+  .<span class="fn">gain</span>(<span class="num">0.6</span>).<span class="fn">room</span>(<span class="num">0.4</span>)
+  .<span class="fn">delay</span>(<span class="num">0.125</span>)`;
+
+const sampleLong = `<span class="cm">// ms jackson</span>
+<span class="fn">note</span>(<span class="str">"&lt;c3 eb3 g3 bb3&gt;"</span>).<span class="fn">s</span>(<span class="str">"sawtooth"</span>).<span class="fn">cutoff</span>(<span class="fn">sine</span>.<span class="fn">range</span>(<span class="num">200</span>, <span class="num">2000</span>).<span class="fn">slow</span>(<span class="num">8</span>)).<span class="fn">gain</span>(<span class="num">0.6</span>).<span class="fn">room</span>(<span class="num">0.4</span>).<span class="fn">delay</span>(<span class="num">0.125</span>)`;
+
+const fonts = [
+  {
+    name: 'Share Tech Mono',
+    css: "'Share Tech Mono', monospace",
+    vibe: 'HUD readout. Military-industrial spec sheet.',
+    tag: 'FUTURISTIC',
+    accent: '#00ff9f',
+  },
+  {
+    name: 'Martian Mono',
+    css: "'Martian Mono', monospace",
+    vibe: 'Designed for Mars colony terminals. Wide, engineered, alien.',
+    tag: 'SCI-FI',
+    accent: '#ff5370',
+  },
+  {
+    name: 'Syne Mono',
+    css: "'Syne Mono', monospace",
+    vibe: 'Art school typographic experiment. Uneven, intentional.',
+    tag: 'DESIGNER',
+    accent: '#c792ea',
+  },
+  {
+    name: 'Xanh Mono',
+    css: "'Xanh Mono', monospace",
+    vibe: 'Vietnamese typographic tradition meets code. Serif mono, literary.',
+    tag: 'LITERARY',
+    accent: '#82aaff',
+  },
+  {
+    name: 'Major Mono Display',
+    css: "'Major Mono Display', monospace",
+    vibe: 'ALL-CAPS brutalism. Anti-readability as aesthetic.',
+    tag: 'BRUTALIST',
+    accent: '#ff5370',
+    wide: true,
+    sample: sampleLong,
+  },
+  {
+    name: 'Fragment Mono',
+    css: "'Fragment Mono', monospace",
+    vibe: 'Sharp geometric construction. Each glyph feels stamped.',
+    tag: 'INDUSTRIAL',
+    accent: '#f78c6c',
+  },
+  {
+    name: 'Azeret Mono',
+    css: "'Azeret Mono', monospace",
+    vibe: 'Neo-grotesque mono. Clean but strange proportions.',
+    tag: 'NEO-GROTESK',
+    accent: '#c3e88d',
+  },
+  {
+    name: 'Cutive Mono',
+    css: "'Cutive Mono', monospace",
+    vibe: 'Typewriter ribbon on cheap paper. Physical, worn.',
+    tag: 'CASSETTE PUNK',
+    accent: '#e6b450',
+  },
+  {
+    name: 'DM Mono',
+    css: "'DM Mono', monospace",
+    vibe: 'Understated but off-kilter. Something is slightly wrong.',
+    tag: 'UNCANNY',
+    accent: '#89ddff',
+  },
+  {
+    name: 'Overpass Mono',
+    css: "'Overpass Mono', monospace",
+    vibe: 'Highway signage system adapted for code. Functional brutalism.',
+    tag: 'INFRASTRUCTURE',
+    accent: '#ffcb6b',
+  },
+  {
+    name: 'Silkscreen',
+    css: "'Silkscreen', monospace",
+    vibe: 'PCB silkscreen print. Circuit board labels as a font.',
+    tag: 'HARDWARE',
+    accent: '#00ff9f',
+  },
+  {
+    name: 'Nova Mono',
+    css: "'Nova Mono', monospace",
+    vibe: 'Organic curves in a monospace grid. Alien botany field notes.',
+    tag: 'XENOTYPE',
+    accent: '#c792ea',
+  },
+];
+
+const grid = document.getElementById('grid');
+for (const f of fonts) {
+  const card = document.createElement('div');
+  card.className = `card${f.wide ? ' wide' : ''}`;
+  card.style.setProperty('--accent', f.accent || '#e6b450');
+  card.innerHTML = `
+    <div class="card-header">
+      <div class="card-label">${f.name}</div>
+      <div class="card-tag">${f.tag}</div>
+    </div>
+    <div class="card-vibe">${f.vibe}</div>
+    <pre style="font-family: ${f.css}">${f.sample || sample}</pre>
+  `;
+  grid.appendChild(card);
+}
+</script>
+</body>
+</html>

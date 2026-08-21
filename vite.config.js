@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 const SONGS_DIR = path.resolve(__dirname, 'songs');
+const PATCHES_DIR = path.resolve(__dirname, 'synth-modules/patches');
 
 function liveSyncPlugin() {
   return {
@@ -107,6 +108,71 @@ function songsApi() {
   };
 }
 
+function patchesApi() {
+  return {
+    name: 'patches-api',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (!req.url.startsWith('/api/patches')) return next();
+
+        // GET /api/patches — list all patch files
+        if (req.method === 'GET' && req.url === '/api/patches') {
+          if (!fs.existsSync(PATCHES_DIR)) { res.setHeader('Content-Type', 'application/json'); res.end('[]'); return; }
+          const files = fs.readdirSync(PATCHES_DIR).filter(f => f.endsWith('.json'));
+          const patches = files.map(f => {
+            const stat = fs.statSync(path.join(PATCHES_DIR, f));
+            return { name: f.replace(/\.json$/, ''), mtime: stat.mtimeMs };
+          });
+          patches.sort((a, b) => b.mtime - a.mtime);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(patches));
+          return;
+        }
+
+        // Extract patch name from /api/patches/:name
+        const match = req.url.match(/^\/api\/patches\/(.+)$/);
+        if (!match) return next();
+        const patchName = decodeURIComponent(match[1]);
+        const filePath = path.join(PATCHES_DIR, patchName + '.json');
+
+        if (!filePath.startsWith(PATCHES_DIR)) {
+          res.statusCode = 400;
+          res.end('Bad request');
+          return;
+        }
+
+        // GET /api/patches/:name
+        if (req.method === 'GET') {
+          if (!fs.existsSync(filePath)) { res.statusCode = 404; res.end('Not found'); return; }
+          res.setHeader('Content-Type', 'application/json');
+          res.end(fs.readFileSync(filePath, 'utf-8'));
+          return;
+        }
+
+        // PUT /api/patches/:name
+        if (req.method === 'PUT') {
+          let body = '';
+          req.on('data', chunk => body += chunk);
+          req.on('end', () => {
+            fs.writeFileSync(filePath, body, 'utf-8');
+            res.end('ok');
+          });
+          return;
+        }
+
+        // DELETE /api/patches/:name
+        if (req.method === 'DELETE') {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          res.end('ok');
+          return;
+        }
+
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [songsApi(), liveSyncPlugin()],
+  plugins: [songsApi(), patchesApi(), liveSyncPlugin()],
 });

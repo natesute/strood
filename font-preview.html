@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Strood Font Preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Victor+Mono:ital,wght@0,400;0,700;1,400&family=Recursive:CASL,MONO,wght@0,1,400;0.5,1,400;1,1,400&family=IBM+Plex+Mono:wght@400;700&family=Departure+Mono&family=Geist+Mono:wght@400;700&family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0e14;
+    color: #b3b1ad;
+    font-family: system-ui;
+    padding: 40px;
+  }
+  h1 {
+    font-family: system-ui;
+    font-size: 14px;
+    color: #484f58;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 32px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+  .card {
+    background: #0d1117;
+    border: 1px solid #1a1f29;
+    border-radius: 6px;
+    padding: 20px 24px;
+    transition: border-color 0.2s;
+  }
+  .card:hover {
+    border-color: #e6b450;
+  }
+  .card-label {
+    font-family: system-ui;
+    font-size: 10px;
+    color: #e6b450;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 4px;
+  }
+  .card-vibe {
+    font-family: system-ui;
+    font-size: 10px;
+    color: #3d4455;
+    margin-bottom: 16px;
+  }
+  .card pre {
+    font-size: 13px;
+    line-height: 1.7;
+    white-space: pre;
+    color: #b3b1ad;
+  }
+  .card pre .kw { color: #ff8f40; }
+  .card pre .str { color: #c2d94c; }
+  .card pre .num { color: #e6b450; }
+  .card pre .fn { color: #ffb454; }
+  .card pre .cm { color: #3d4455; font-style: italic; }
+  .card pre .op { color: #f29668; }
+
+  /* font assignments */
+  .f-space-mono pre { font-family: 'Space Mono', monospace; }
+  .f-victor-mono pre { font-family: 'Victor Mono', monospace; }
+  .f-victor-mono pre .cm,
+  .f-victor-mono pre .str { font-style: italic; }
+  .f-recursive-casual pre { font-family: 'Recursive', monospace; font-variation-settings: 'CASL' 1, 'MONO' 1; }
+  .f-recursive-mid pre { font-family: 'Recursive', monospace; font-variation-settings: 'CASL' 0.5, 'MONO' 1; }
+  .f-departure pre { font-family: 'Departure Mono', monospace; }
+  .f-geist pre { font-family: 'Geist Mono', monospace; }
+  .f-ibm-plex pre { font-family: 'IBM Plex Mono', monospace; }
+  .f-courier-prime pre { font-family: 'Courier Prime', monospace; }
+  .f-jetbrains pre { font-family: 'JetBrains Mono', monospace; }
+  .f-system pre { font-family: ui-monospace, 'SF Mono', monospace; }
+</style>
+</head>
+<body>
+
+<h1>Strood — Font Preview</h1>
+
+<div class="grid" id="grid"></div>
+
+<script>
+const sample = `<span class="cm">// ms jackson</span>
+<span class="fn">note</span>(<span class="str">"&lt;c3 eb3 g3 bb3&gt;"</span>)
+  .<span class="fn">s</span>(<span class="str">"sawtooth"</span>)
+  .<span class="fn">cutoff</span>(<span class="fn">sine</span>.<span class="fn">range</span>(<span class="num">200</span>, <span class="num">2000</span>).<span class="fn">slow</span>(<span class="num">8</span>))
+  .<span class="fn">gain</span>(<span class="num">0.6</span>)
+  .<span class="fn">room</span>(<span class="num">0.4</span>)
+  .<span class="fn">delay</span>(<span class="num">0.125</span>)`;
+
+const fonts = [
+  ['Space Mono', 'f-space-mono', 'Brutalist / editorial grit'],
+  ['Victor Mono', 'f-victor-mono', 'Cursive italics, code meets notation'],
+  ['Recursive Casual', 'f-recursive-casual', 'Hand-drawn, full casual axis'],
+  ['Recursive Half-Casual', 'f-recursive-mid', 'Halfway between strict and playful'],
+  ['Departure Mono', 'f-departure', 'Pixel art object'],
+  ['Geist Mono', 'f-geist', 'Vercel — tight and modern'],
+  ['IBM Plex Mono', 'f-ibm-plex', 'Classic IBM terminal'],
+  ['Courier Prime', 'f-courier-prime', 'Cinematic screenplay feel'],
+  ['JetBrains Mono (current)', 'f-jetbrains', 'Current Strood font'],
+  ['System Mono (SF Mono)', 'f-system', 'macOS default'],
+];
+
+const grid = document.getElementById('grid');
+for (const [name, cls, vibe] of fonts) {
+  const card = document.createElement('div');
+  card.className = `card ${cls}`;
+  card.innerHTML = `<div class="card-label">${name}</div><div class="card-vibe">${vibe}</div><pre>${sample}</pre>`;
+  grid.appendChild(card);
+}
+</script>
+</body>
+</html>

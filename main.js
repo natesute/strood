@@ -6,6 +6,13 @@ import {
   registerSynthSounds,
   samples,
 } from '@strudel/webaudio';
+import { registerPatch, initModularSynth } from './synth-modules/index.mjs';
+import { showPatchEditor, closePatchEditor, togglePatchEditor } from './patch-editor.js';
+import initPatch from './synth-modules/patches/init.json';
+import acidPatch from './synth-modules/patches/acid-bass.json';
+import lushPatch from './synth-modules/patches/lush-pad.json';
+import glitchPatch from './synth-modules/patches/glitch-pluck.json';
+import voxPatch from './synth-modules/patches/vox-pad.json';
 import { transpiler } from '@strudel/transpiler';
 import { evalScope, getFrequency, freqToMidi, midiToFreq } from '@strudel/core';
 import { toggleLineComment } from '@codemirror/commands';
@@ -193,28 +200,24 @@ registerWidget('_tonnetz', (id, options = {}, pat) => {
     // Grid connections (fifths horizontal, thirds vertical, diagonal)
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
     ctx.lineWidth = 1;
+    ctx.beginPath();
     for (const p of lattice) {
       const px = ox + p.gx * spacingX;
       const py = oy - p.gy * spacingY;
       if (p.gx < 3) {
-        ctx.beginPath();
         ctx.moveTo(px, py);
         ctx.lineTo(ox + (p.gx + 1) * spacingX, py);
-        ctx.stroke();
       }
       if (p.gy < 2) {
-        ctx.beginPath();
         ctx.moveTo(px, py);
         ctx.lineTo(px, oy - (p.gy + 1) * spacingY);
-        ctx.stroke();
       }
       if (p.gx < 3 && p.gy > -2) {
-        ctx.beginPath();
         ctx.moveTo(px, py);
         ctx.lineTo(ox + (p.gx + 1) * spacingX, oy - (p.gy - 1) * spacingY);
-        ctx.stroke();
       }
     }
+    ctx.stroke();
 
     // Draw triangles for active triads
     if (activePCs.size >= 3) {
@@ -253,24 +256,54 @@ registerWidget('_tonnetz', (id, options = {}, pat) => {
     for (const p of lattice) {
       const px = ox + p.gx * spacingX;
       const py = oy - p.gy * spacingY;
-      const isActive = activePCs.has(p.pc);
+    }
 
-      if (isActive) {
-        ctx.fillStyle = 'rgba(180, 120, 255, 0.3)';
-        ctx.beginPath();
-        ctx.arc(px, py, 14, 0, Math.PI * 2);
-        ctx.fill();
-      }
+    // Lattice dots — batched by style to reduce state changes
+    // 1) Inactive dots
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.beginPath();
+    for (const p of lattice) {
+      if (activePCs.has(p.pc)) continue;
+      const px = ox + p.gx * spacingX;
+      const py = oy - p.gy * spacingY;
+      ctx.moveTo(px + 4, py);
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+    }
+    ctx.fill();
 
-      ctx.fillStyle = isActive ? '#bb88ff' : 'rgba(255, 255, 255, 0.15)';
-      ctx.beginPath();
-      ctx.arc(px, py, isActive ? 8 : 4, 0, Math.PI * 2);
-      ctx.fill();
+    // 2) Active glow
+    ctx.fillStyle = 'rgba(180, 120, 255, 0.3)';
+    ctx.beginPath();
+    for (const p of lattice) {
+      if (!activePCs.has(p.pc)) continue;
+      const px = ox + p.gx * spacingX;
+      const py = oy - p.gy * spacingY;
+      ctx.moveTo(px + 14, py);
+      ctx.arc(px, py, 14, 0, Math.PI * 2);
+    }
+    ctx.fill();
 
-      if (isActive) {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-        ctx.font = `${Math.round(w / 25)}px monospace`;
-        ctx.textAlign = 'center';
+    // 3) Active dots
+    ctx.fillStyle = '#bb88ff';
+    ctx.beginPath();
+    for (const p of lattice) {
+      if (!activePCs.has(p.pc)) continue;
+      const px = ox + p.gx * spacingX;
+      const py = oy - p.gy * spacingY;
+      ctx.moveTo(px + 8, py);
+      ctx.arc(px, py, 8, 0, Math.PI * 2);
+    }
+    ctx.fill();
+
+    // 4) Active labels
+    if (activePCs.size > 0) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.font = `${Math.round(w / 25)}px monospace`;
+      ctx.textAlign = 'center';
+      for (const p of lattice) {
+        if (!activePCs.has(p.pc)) continue;
+        const px = ox + p.gx * spacingX;
+        const py = oy - p.gy * spacingY;
         ctx.fillText(noteNames[p.pc], px, py - 12);
       }
     }
@@ -632,9 +665,13 @@ let syncEnabled = false;
 let saveTimeout = null;
 let suppressNextUpdate = false;
 
+let _saveTimer = 0;
 function debouncedSave() {
-  // Only save to localStorage for session recovery, not to disk
-  localStorage.setItem('strudel_code', getAllCode());
+  if (_saveTimer) return;
+  _saveTimer = setTimeout(() => {
+    _saveTimer = 0;
+    localStorage.setItem('strudel_code', getAllCode());
+  }, 300);
 }
 
 /* ── Secondary editor highlight decorations ────────────── */
@@ -652,6 +689,8 @@ const secHighlightField = StateField.define({
 
 /* ── Note onset flash (white outline on first frame) ────── */
 const activeHapIds = new Set();
+const onsetTimestamps = new Map(); // uid -> performance.now() when onset detected
+const ONSET_FLASH_MS = 50;
 
 /* ── Dirty-line tracking ────────────────────────────────── */
 const clearDirtyLines = StateEffect.define();
@@ -715,8 +754,7 @@ function updateDirtyCount() {
   dirtyCountEl.textContent = count > 0 ? `${count} dirty` : '';
 }
 
-// Update dirty count on editor changes
-const dirtyCountInterval = setInterval(updateDirtyCount, 500);
+// Dirty count updated on change via listener (see below), not polled
 
 /* ── Prebake ────────────────────────────────────────────── */
 const CDN = 'https://strudel.b-cdn.net';
@@ -738,6 +776,16 @@ async function prebake() {
     samples(`${CDN}/tidal-drum-machines.json`, `${CDN}/tidal-drum-machines/machines/`, { prebake: true }),
     samples('github:tidalcycles/dirt-samples'),
   ]);
+
+  // Initialize modular synth engine (loads custom worklet processors)
+  await initModularSynth();
+
+  // Register modular synth patches
+  registerPatch('init', initPatch);
+  registerPatch('acid', acidPatch);
+  registerPatch('lush', lushPatch);
+  registerPatch('glitch', glitchPatch);
+  registerPatch('vox', voxPatch);
 }
 
 /* ── StrudelMirror ──────────────────────────────────────── */
@@ -864,13 +912,13 @@ editor.editor.dispatch({
   ),
 });
 
-// Auto-save to localStorage + live sync on changes
+// Auto-save to localStorage on changes (debounced) + update dirty count
 editor.editor.dispatch({
   effects: StateEffect.appendConfig.of(
     EditorView.updateListener.of((v) => {
       if (v.docChanged) {
-        localStorage.setItem('strudel_code', v.state.doc.toString());
         debouncedSave();
+        updateDirtyCount();
       }
     })
   ),
@@ -987,6 +1035,7 @@ function setColumnCount(n) {
   }
 
   currentCols = n;
+  _primaryScroller = null; // invalidate cached scroller ref
   if (n === 1) {
     // Single column — put everything back in primary
     editor.setCode(allCode);
@@ -1048,23 +1097,143 @@ function setColumnCount(n) {
   }
 }
 
-/* ── Ripples (inside .cm-scroller, scroll naturally with text) ──── */
+/* ── Ripples (canvas-based, one canvas per scroller) ──────── */
+
+const RIPPLE_DURATION = 400; // ms per ripple animation
+const rippleCanvases = new Map(); // scroller -> { canvas, ctx, w, h }
+const activeRipples = []; // { scroller, x, y, color, gain, startTime }
+let rippleRAF = 0; // 0 = not running
+const _byScroller = new Map(); // reused each frame to avoid alloc
+
+function getOrCreateRippleCanvas(scroller) {
+  let entry = rippleCanvases.get(scroller);
+  if (entry) return entry;
+  const canvas = document.createElement('canvas');
+  canvas.className = 'ripple-canvas';
+  scroller.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+  entry = { canvas, ctx, w: 0, h: 0 };
+  rippleCanvases.set(scroller, entry);
+  return entry;
+}
+
+/** Sync canvas size to scroller's full scroll extent (only when changed) */
+function syncCanvasSize(scroller, entry) {
+  const w = scroller.scrollWidth;
+  const h = scroller.scrollHeight;
+  if (w !== entry.w || h !== entry.h) {
+    entry.canvas.width = w;
+    entry.canvas.height = h;
+    entry.canvas.style.width = w + 'px';
+    entry.canvas.style.height = h + 'px';
+    entry.w = w;
+    entry.h = h;
+  }
+}
 
 function spawnRipple(scroller, x, y, color, gain) {
-  const g = Math.max(0.1, Math.min(gain, 1.5));
-  const size = 30 + g * 80;
-  const border = 4 + g * 4;
+  getOrCreateRippleCanvas(scroller);
+  activeRipples.push({ scroller, x, y, color, gain, startTime: performance.now() });
+  // Start draw loop if not already running
+  if (!rippleRAF) rippleRAF = requestAnimationFrame(drawRipples);
+}
 
-  const ring = document.createElement('div');
-  ring.className = 'ripple';
-  ring.style.left = (x - size / 2) + 'px';
-  ring.style.top = (y - size / 2) + 'px';
-  ring.style.width = size + 'px';
-  ring.style.height = size + 'px';
-  ring.style.borderWidth = border + 'px';
-  ring.style.color = color;
-  scroller.appendChild(ring);
-  ring.addEventListener('animationend', () => ring.remove());
+function drawRipples() {
+  rippleRAF = 0;
+  const now = performance.now();
+
+  // Group ripples by scroller, prune expired (swap-remove: O(1) per removal)
+  _byScroller.clear();
+  let i = 0;
+  while (i < activeRipples.length) {
+    const r = activeRipples[i];
+    if (now - r.startTime >= RIPPLE_DURATION) {
+      activeRipples[i] = activeRipples[activeRipples.length - 1];
+      activeRipples.pop();
+      continue;
+    }
+    if (!_byScroller.has(r.scroller)) _byScroller.set(r.scroller, []);
+    _byScroller.get(r.scroller).push(r);
+    i++;
+  }
+
+  // Draw ripples — canvas covers full scroll extent, only draw near viewport
+  for (const [scroller, ripples] of _byScroller) {
+    const entry = rippleCanvases.get(scroller);
+    if (!entry) continue;
+    syncCanvasSize(scroller, entry);
+    const ctx = entry.ctx;
+
+    // Visible region for culling
+    const vx0 = scroller.scrollLeft - 150;
+    const vy0 = scroller.scrollTop - 150;
+    const vx1 = vx0 + scroller.clientWidth + 300;
+    const vy1 = vy0 + scroller.clientHeight + 300;
+
+    ctx.clearRect(vx0, vy0, vx1 - vx0, vy1 - vy0);
+
+    // Batch ripples by color+lineWidth to minimise state changes
+    // Sort by color key so same-color ripples are grouped
+    const colorGroups = new Map(); // "color|lineWidth" -> [{x,y,radius,opacity}]
+    for (const r of ripples) {
+      if (r.x < vx0 || r.x > vx1 || r.y < vy0 || r.y > vy1) continue;
+
+      const t = (now - r.startTime) / RIPPLE_DURATION; // 0→1
+      const opacity = 0.4 * (1 - t);
+      if (opacity < 0.02) continue; // skip near-invisible ripples
+
+      const g = Math.max(0.1, Math.min(r.gain, 1.5));
+      const maxSize = 30 + g * 80;
+      const scale = 0.3 + t * 1.2; // 0.3→1.5
+      const radius = (maxSize / 2) * scale;
+      const border = (4 + g * 4) * (1 - t * 0.5);
+      const lw = border | 0; // quantise lineWidth to int for better batching
+      const key = r.color + '|' + lw;
+
+      let group = colorGroups.get(key);
+      if (!group) { group = { color: r.color, lw, items: [] }; colorGroups.set(key, group); }
+      group.items.push({ x: r.x, y: r.y, radius, opacity });
+    }
+
+    // Draw each batch: one beginPath + multiple arcs per stroke call
+    for (const { color, lw, items } of colorGroups.values()) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+
+      // Sub-batch by similar opacity (quantised to 0.05 steps)
+      const opacityBuckets = new Map(); // quantised opacity -> [items]
+      for (const item of items) {
+        const qo = Math.round(item.opacity * 20) / 20;
+        let bucket = opacityBuckets.get(qo);
+        if (!bucket) { bucket = []; opacityBuckets.set(qo, bucket); }
+        bucket.push(item);
+      }
+
+      for (const [qo, bucket] of opacityBuckets) {
+        ctx.globalAlpha = qo;
+        ctx.beginPath();
+        for (const item of bucket) {
+          ctx.moveTo(item.x + item.radius, item.y);
+          ctx.arc(item.x, item.y, item.radius, 0, Math.PI * 2);
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Clear canvases that had ripples last frame but don't now
+  for (const [scroller, entry] of rippleCanvases) {
+    if (!_byScroller.has(scroller)) {
+      const ctx = entry.ctx;
+      ctx.clearRect(0, 0, entry.w, entry.h);
+    }
+  }
+
+  // Keep loop alive only while there are active ripples
+  if (activeRipples.length > 0) {
+    rippleRAF = requestAnimationFrame(drawRipples);
+  }
 }
 
 /** Convert viewport coords to scroller-relative coords */
@@ -1077,16 +1246,23 @@ function viewportToScroller(scroller, vx, vy) {
 }
 
 /** Resolve scroller + scroller-relative center of a token */
+let _primaryScroller = null;
+const _secScrollerCache = new WeakMap();
+const _resolveResult = { scroller: null, x: 0, y: 0 }; // reused object
+
 function resolveHapPosition(loc) {
   try {
     const start = editor.editor.coordsAtPos(loc.start);
     const end = editor.editor.coordsAtPos(loc.end);
     if (start && end) {
-      const scroller = editor.editor.dom.querySelector('.cm-scroller');
+      if (!_primaryScroller) _primaryScroller = editor.editor.dom.querySelector('.cm-scroller');
       const cx = (start.left + end.left) / 2;
       const cy = (start.top + start.bottom) / 2;
-      const pos = viewportToScroller(scroller, cx, cy);
-      return { scroller, x: pos.x, y: pos.y };
+      const pos = viewportToScroller(_primaryScroller, cx, cy);
+      _resolveResult.scroller = _primaryScroller;
+      _resolveResult.x = pos.x;
+      _resolveResult.y = pos.y;
+      return _resolveResult;
     }
   } catch (_) {}
   for (let i = 0; i < secondaryEditors.length; i++) {
@@ -1095,14 +1271,19 @@ function resolveHapPosition(loc) {
     const adjEnd = loc.end - off;
     if (adjStart < 0) continue;
     try {
-      const start = secondaryEditors[i].view.coordsAtPos(adjStart);
-      const end = secondaryEditors[i].view.coordsAtPos(adjEnd);
+      const secView = secondaryEditors[i].view;
+      const start = secView.coordsAtPos(adjStart);
+      const end = secView.coordsAtPos(adjEnd);
       if (start && end) {
-        const scroller = secondaryEditors[i].view.dom.querySelector('.cm-scroller');
+        let scroller = _secScrollerCache.get(secView);
+        if (!scroller) { scroller = secView.dom.querySelector('.cm-scroller'); _secScrollerCache.set(secView, scroller); }
         const cx = (start.left + end.left) / 2;
         const cy = (start.top + start.bottom) / 2;
         const pos = viewportToScroller(scroller, cx, cy);
-        return { scroller, x: pos.x, y: pos.y };
+        _resolveResult.scroller = scroller;
+        _resolveResult.x = pos.x;
+        _resolveResult.y = pos.y;
+        return _resolveResult;
       }
     } catch (_) {}
   }
@@ -1118,6 +1299,55 @@ function resolveHapPosition(loc) {
  * that are musical notes (a4, f2, gs5…) or triggers (t) or sample names (bd, hh…).
  */
 const NOTE_RE = /^[a-gA-G][sfb#]?\d+$/;
+
+/** Return true if a location text represents a note or drum trigger */
+function isMusicalLocation(text) {
+  if (NOTE_RE.test(text)) return true;
+  if (text === 't') return true;
+  return false;
+}
+
+// Cache: location start→end → isMusical result. Invalidated on eval.
+let locationClassCache = new Map(); // key: "start:end" → boolean
+let locationCacheCode = ''; // tracks which eval the cache belongs to
+
+/** Filter a hap's locations to only musical ones (notes, triggers, sample names) */
+function filterMusicalLocations(hap) {
+  if (!hap.context?.locations || !lastEvalCode) return hap;
+
+  // Invalidate cache when code changes
+  if (lastEvalCode !== locationCacheCode) {
+    locationClassCache = new Map();
+    locationCacheCode = lastEvalCode;
+  }
+
+  // Classify each location (cached)
+  const noteLocs = [];
+  const sampleLocs = [];
+  const sValue = hap.value?.s;
+
+  for (const loc of hap.context.locations) {
+    if (loc.start < 0 || loc.end > lastEvalCode.length) continue;
+    const key = `${loc.start}:${loc.end}`;
+    let cached = locationClassCache.get(key);
+    if (cached === undefined) {
+      const text = lastEvalCode.slice(loc.start, loc.end);
+      cached = { text, isMusical: isMusicalLocation(text) };
+      locationClassCache.set(key, cached);
+    }
+    if (cached.isMusical) {
+      noteLocs.push(loc);
+    } else if (sValue && cached.text === sValue) {
+      sampleLocs.push(loc);
+    }
+  }
+
+  // If we found notes/triggers, use those (ignore sample name like "sawtooth", "piano")
+  // If we found NO notes, the sample name IS the trigger (e.g. "bd", "hh", "sd")
+  const filtered = noteLocs.length > 0 ? noteLocs : sampleLocs;
+  if (filtered.length === hap.context.locations.length) return hap;
+  return { ...hap, context: { ...hap.context, locations: filtered } };
+}
 
 function findNoteLocation(hap) {
   if (!hap.context?.locations || !lastEvalCode) return null;
@@ -1148,39 +1378,86 @@ function findNoteLocation(hap) {
  * Each hap gets its own entry keyed by time span + source position.
  * Ripples emit on the highlight frame at a fixed rate.
  */
-const liveHaps = new Map(); // uid -> { scroller, x, y, color, gain, lastEmit }
-const RIPPLE_INTERVAL = 150; // ms between ripples for held notes
+const liveHaps = new Map(); // uid -> { loc, color, gain, lastEmit }
+const RIPPLE_SUSTAIN_INTERVAL = 250; // ms between ripples for held notes
 
 const _origHighlight = editor.highlight.bind(editor);
+const HIGHLIGHT_INTERVAL = 33; // ~30fps throttle for highlights
+let lastHighlightTime = 0;
+
+/** Stable UID for a hap — avoid per-frame string concat */
+function hapUid(hap) {
+  return hap.whole.begin * 1e6 + hap.whole.end; // numeric key, no string alloc
+}
+
 editor.highlight = function (haps, time) {
-  // On first frame of a hap, override its outline to white, then let normal color take over
+  const nowMs = performance.now();
+
+  // Throttle to ~30fps, but always run if there's a new onset
+  if (nowMs - lastHighlightTime < HIGHLIGHT_INTERVAL) {
+    let hasNewOnset = false;
+    for (let i = 0; i < haps.length; i++) {
+      const h = haps[i];
+      if (h.context?.locations && h.whole && !activeHapIds.has(hapUid(h))) {
+        hasNewOnset = true;
+        break;
+      }
+    }
+    if (!hasNewOnset) return;
+  }
+  lastHighlightTime = nowMs;
+
+  // Track onsets — record timestamp when a hap first appears
   const currentIds = new Set();
-  const onsetHaps = [];
   for (const hap of haps) {
     if (!hap.context?.locations || !hap.whole) continue;
-    const uid = `${hap.whole.begin}:${hap.whole.end}`;
+    const uid = hapUid(hap);
     currentIds.add(uid);
     if (!activeHapIds.has(uid)) {
       activeHapIds.add(uid);
-      onsetHaps.push(hap);
+      onsetTimestamps.set(uid, nowMs);
     }
   }
   for (const uid of activeHapIds) {
-    if (!currentIds.has(uid)) activeHapIds.delete(uid);
+    if (!currentIds.has(uid)) {
+      activeHapIds.delete(uid);
+      onsetTimestamps.delete(uid);
+    }
   }
 
-  if (onsetHaps.length > 0) {
-    // First call: pass onset haps with white outline
-    const whiteHaps = onsetHaps.map(h => ({
-      ...h,
-      value: { ...h.value, color: '#ffffff', markcss: 'outline: solid 2px #ffffff' },
-    }));
-    _origHighlight(whiteHaps, time);
-    // Next frame: re-highlight with real colors
-    requestAnimationFrame(() => _origHighlight(haps, time));
-  } else {
-    _origHighlight(haps, time);
+  // Filter to musical locations only, then apply white flash for onsets
+  // Reuse the array when possible — only allocate new hap objects for flashing onsets
+  let hasFlash = false;
+  for (const [uid, ts] of onsetTimestamps) {
+    if (nowMs - ts < ONSET_FLASH_MS) { hasFlash = true; break; }
   }
+
+  let mixedHaps;
+  if (hasFlash) {
+    mixedHaps = haps.map(h => {
+      const filtered = filterMusicalLocations(h);
+      if (!filtered.whole) return filtered;
+      const uid = hapUid(filtered);
+      const onsetTime = onsetTimestamps.get(uid);
+      if (onsetTime !== undefined && nowMs - onsetTime < ONSET_FLASH_MS) {
+        return { ...filtered, value: { ...filtered.value, color: '#ffffff', markcss: 'outline: solid 4px #ffffff' } };
+      }
+      return filtered;
+    });
+  } else {
+    // No flashes active — avoid allocating a new array if filterMusicalLocations is a no-op for all
+    let anyFiltered = false;
+    for (let i = 0; i < haps.length; i++) {
+      if (filterMusicalLocations(haps[i]) !== haps[i]) { anyFiltered = true; break; }
+    }
+    if (anyFiltered) {
+      mixedHaps = new Array(haps.length);
+      for (let i = 0; i < haps.length; i++) mixedHaps[i] = filterMusicalLocations(haps[i]);
+    } else {
+      mixedHaps = haps; // zero-alloc path: pass through unchanged
+    }
+  }
+  _origHighlight(mixedHaps, time);
 
   // Distribute highlights to secondary editors
   if (currentCols > 1 && secondaryEditors.length > 0) {
@@ -1208,19 +1485,20 @@ editor.highlight = function (haps, time) {
     }
   }
 
-  // Ripples — one per hap, keyed by time span + source location
+  // Ripples — onset fires immediately, held notes pulse at slow sustain rate
   const now = performance.now();
-  const currentIds = new Set();
+  const currentRippleIds = new Set();
 
   for (const hap of haps) {
     if (!hap.context?.locations || !hap.whole) continue;
     const noteLoc = findNoteLocation(hap);
     if (!noteLoc) continue;
 
-    const uid = `${hap.whole.begin}:${hap.whole.end}:${noteLoc.start}`;
-    currentIds.add(uid);
+    const uid = hap.whole.begin * 1e9 + hap.whole.end * 1e3 + noteLoc.start;
+    currentRippleIds.add(uid);
 
-    if (!liveHaps.has(uid)) {
+    const isNew = !liveHaps.has(uid);
+    if (isNew) {
       liveHaps.set(uid, {
         loc: noteLoc,
         color: hap.value?.color ?? 'white',
@@ -1230,7 +1508,8 @@ editor.highlight = function (haps, time) {
     }
 
     const e = liveHaps.get(uid);
-    if (now - e.lastEmit >= RIPPLE_INTERVAL) {
+    // Emit immediately on onset, then at slow sustain rate
+    if (isNew || now - e.lastEmit >= RIPPLE_SUSTAIN_INTERVAL) {
       const pos = resolveHapPosition(e.loc);
       if (pos) spawnRipple(pos.scroller, pos.x, pos.y, e.color, e.gain);
       e.lastEmit = now;
@@ -1238,7 +1517,7 @@ editor.highlight = function (haps, time) {
   }
 
   for (const [uid] of liveHaps) {
-    if (!currentIds.has(uid)) liveHaps.delete(uid);
+    if (!currentRippleIds.has(uid)) liveHaps.delete(uid);
   }
 };
 
@@ -1247,6 +1526,13 @@ async function onEditorKeydown(e) {
   const ctrl = e.ctrlKey || e.metaKey;
 
   const view = e.currentTarget.cmView?.view || editor.editor;
+
+  // Ctrl+Enter — evaluate
+  if (ctrl && e.key === 'Enter') {
+    e.preventDefault();
+    evaluateAll();
+    return;
+  }
 
   // Ctrl+M — mute (toggle line comment)
   if (ctrl && e.key === 'm') {
@@ -1287,6 +1573,13 @@ async function onEditorKeydown(e) {
   if (ctrl && e.key === 's') {
     e.preventDefault();
     saveSong();
+    return;
+  }
+
+  // Ctrl+P — toggle patch editor
+  if (ctrl && e.key === 'p') {
+    e.preventDefault();
+    togglePatchEditor();
     return;
   }
 

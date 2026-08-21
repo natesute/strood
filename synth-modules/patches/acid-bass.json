@@ -1,0 +1,49 @@
+{
+  "name": "acid",
+  "modules": {
+    "osc1": {
+      "type": "sawtooth",
+      "params": {}
+    },
+    "filter1": {
+      "type": "biquad",
+      "params": {
+        "type": "lowpass",
+        "frequency": 400,
+        "resonance": 12
+      }
+    },
+    "amp": {
+      "type": "vca",
+      "params": {
+        "gain": 0
+      }
+    },
+    "env1": {
+      "type": "env",
+      "params": {
+        "a": 0.001,
+        "d": 0.15,
+        "s": 0.0,
+        "r": 0.05
+      }
+    },
+    "env2": {
+      "type": "env",
+      "params": {
+        "a": 0.001,
+        "d": 0.12,
+        "s": 0.0,
+        "r": 0.05
+      }
+    }
+  },
+  "routing": [
+    ["osc1", "filter1"],
+    ["filter1", "amp"]
+  ],
+  "matrix": [
+    { "src": "env1", "dst": "amp.gain", "depth": 0.9 },
+    { "src": "env2", "dst": "filter1.frequency", "depth": 6000 }
+  ]
+}

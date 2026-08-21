@@ -3,14 +3,14 @@ setcpm(95/4)
 // VOCAL
 $: note("<[~ ~ ~ a4 e5 d5 d5 d5 ~ e5 ~ ~ a5@4] [e5 ~ e5 ~ e5 ~ g5@3 f5 e5 ~ ~ ~ ~ ~] [d5 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~] [a4 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~]>")
   .sound("sawtooth").gain(.8).clip(.7).release(.5).lpf(2100).room(.2).size(2).color("#ff8844").delay(.3)
-  ._spiral({ stretch: 0.5, size: 200, thickness: 30, steady: 0, fade: 0.001, colorizeInactive: 0 })
+  ._spiral({ stretch: 0.5, size: 100, thickness: 30, steady: 0, fade: 0.001, colorizeInactive: 0 })
 // BASS
 $: stack(
    note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a2 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
      .sound("sine").gain(.2).lpf(150).clip(.9).release(0.1),
    note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a1 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
-     .sound("square").gain(.2).lpf(sine.range(180,350).slow(8)).lpq(4).clip(.5).release(.1).shape(0.9).postgain(0.3)
- ).color("dodgerblue")._scope()
+     .sound("square").gain(.2).lpf(sine.range(180,350).slow(8)).lpq(4).clip(.5).release(.1).shape(0.9).postgain(0.3)).color("dodgerblue")
+  ._scope()
 // ORGAN
 $: stack(
   note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
@@ -18,8 +18,7 @@ $: stack(
     .superimpose(x => x.add(note(.08))),
   note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
     .sound("sawtooth").release(0.1).gain(.3).lpf(perlin.range(1100,1200).slow(4)).lpq(2).vib("4.5:.1").shape(.15).postgain(.5).room(0.8).size(5)
-    .superimpose(x => x.add(note(-.12)).delay(".3:.12:.5"))
-).color("magenta")._lissajous({ size: 200 })
+    .superimpose(x => x.add(note(-.12)).delay(".3:.12:.5"))).color("magenta")
 
 // STABS
 $: stack(
@@ -35,6 +34,6 @@ $: stack(
 ).sound("piano").clip(.5).release(.4).delay(".2:.15:.4").room(.3).size(5).color("white")
 
 // DRUMS
-$: s("bd").struct("t ~ ~ ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~ ~ ~").bank("RolandTR909").gain(0.2).shape(0.4).release(1).room(.1).color("red")._orbit({ size: 150 })
+$: s("bd").struct("t ~ ~ ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~ ~ ~").bank("RolandTR909").gain(0.2).shape(0.4).release(1).room(.1).color("red")
 $: s("sd").struct("~ ~ ~ ~ t ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~").bank("RolandTR909").gain(0.5).room(.2).size(2).color("yellow")
 $: s("hh*8").gain("[.25 .35]*4").clip(sine.range(.04,.06).fast(2)).shape(.1).color("lime")

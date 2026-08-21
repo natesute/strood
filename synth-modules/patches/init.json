@@ -1,0 +1,49 @@
+{
+  "name": "init",
+  "modules": {
+    "osc1": {
+      "type": "sawtooth",
+      "params": {}
+    },
+    "filter1": {
+      "type": "biquad",
+      "params": {
+        "type": "lowpass",
+        "frequency": 2000,
+        "resonance": 2
+      }
+    },
+    "amp": {
+      "type": "vca",
+      "params": {
+        "gain": 0
+      }
+    },
+    "env1": {
+      "type": "env",
+      "params": {
+        "a": 0.01,
+        "d": 0.3,
+        "s": 0.6,
+        "r": 0.4
+      }
+    },
+    "env2": {
+      "type": "env",
+      "params": {
+        "a": 0.005,
+        "d": 0.2,
+        "s": 0.1,
+        "r": 0.3
+      }
+    }
+  },
+  "routing": [
+    ["osc1", "filter1"],
+    ["filter1", "amp"]
+  ],
+  "matrix": [
+    { "src": "env1", "dst": "amp.gain", "depth": 0.8 },
+    { "src": "env2", "dst": "filter1.frequency", "depth": 4000 }
+  ]
+}
