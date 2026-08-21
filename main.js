@@ -25,8 +25,8 @@ import {
 } from './src/api.js';
 import { saveRecoverySnapshot, listRecoverySnapshots, clearRecoverySnapshots } from './src/recovery.js';
 import { parseTracks, routeTracksForPlayback } from './src/tracks.js';
-import { ensureMasterEngine, getMasterGain, readMasterMeter, setMasterGain } from './src/audio-engine.js';
-import { RuntimeMixer } from './src/mixer.js';
+import { ensureMasterEngine, readMasterMeter } from './src/audio-engine.js';
+import { inlineControlExtensions } from './src/inline-controls.js';
 import { parseSections, sectionAtCycle, nextCycleTiming } from './src/song-metadata.js';
 import { loadSamplePacks } from './src/sample-loader.js';
 import { choiceDialog, confirmDialog, promptDialog } from './src/dialogs.js';
@@ -47,7 +47,6 @@ let lastSavedCode = '';
 let documentDirty = false;
 let pendingExternalUpdate = null;
 let recoveryTimer = 0;
-const mixer = new RuntimeMixer();
 let currentSections = [];
 let queuedUpdateTimer = 0;
 let queuedTargetCycle = null;
@@ -65,7 +64,6 @@ function debouncedSave() {
     _saveTimer = 0;
     localStorage.setItem('strudel_code', getAllCode());
     updateDocumentState();
-    renderTracks();
     clearTimeout(recoveryTimer);
     recoveryTimer = window.setTimeout(() => {
       if (documentDirty) saveRecoverySnapshot(currentSongName, getAllCode(), 'autosave');
@@ -153,7 +151,6 @@ const diagnosticsEl = document.getElementById('diagnostics');
 const diagnosticMessageEl = document.getElementById('diagnostic-message');
 const masterLevelEl = document.getElementById('master-level');
 const masterPeakEl = document.getElementById('master-peak');
-const masterVolumeEl = document.getElementById('master-volume');
 const limiterStateEl = document.getElementById('limiter-state');
 const cycleStatusEl = document.getElementById('cycle-status');
 const sectionStatusEl = document.getElementById('section-status');
@@ -346,6 +343,7 @@ editor.editor.dispatch({
       Prec.highest(syntaxHighlighting(customHighlight)),
       dirtyLineField,
       errorLineField,
+      ...inlineControlExtensions,
       cursorStatusListener,
       documentChangeListener,
     ]),
@@ -422,7 +420,6 @@ async function performEvaluation(allCode, autostart) {
     currentSections = parseSections(allCode);
     clearAllDirtyLines();
     updateDocumentState();
-    renderTracks(tracks);
   } catch (error) {
     showDiagnostic(error);
     throw error;
@@ -504,6 +501,7 @@ function createSecondaryEditor(initialCode = editor.code, columnIndex = 1) {
         dirtyLineField,
         errorLineField,
         secHighlightField,
+        ...inlineControlExtensions,
         customThemeColors,
         Prec.highest(syntaxHighlighting(customHighlight)),
       ]),
@@ -541,162 +539,7 @@ function setColumnCount(n) {
   });
 }
 
-/* ── Track rail ───────────────────────────────────────────── */
-const trackListEl = document.getElementById('track-list');
-const trackEmptyEl = document.getElementById('track-empty');
-const trackCountEl = document.getElementById('track-count');
-const trackMeterEls = new Map();
-let renderedTrackSignature = '';
-let mixedTrackSignature = '';
-
-function focusTrack(track) {
-  editor.editor.dispatch({
-    selection: { anchor: track.start },
-    effects: EditorView.scrollIntoView(track.start, { y: 'center' }),
-  });
-  editor.editor.focus();
-}
-
-function toggleTrackMute(track) {
-  const state = mixer.stateFor(track);
-  mixer.update(track, { muted: !state.muted });
-  renderTracks();
-}
-
-function toggleTrackSolo(track) {
-  const state = mixer.stateFor(track);
-  mixer.update(track, { solo: !state.solo });
-  renderTracks();
-}
-
-function renderTracks(tracks = parseTracks(getAllCode())) {
-  const topologySignature = tracks.map((track) =>
-    `${track.key}:${track.name}:${track.line}:${track.start}:${track.end}:${track.orbit}`).join('|');
-  if (topologySignature !== mixedTrackSignature) {
-    mixedTrackSignature = topologySignature;
-    mixer.sync(tracks);
-  }
-  const signature = `${topologySignature}|${tracks.map((track) => {
-    const state = mixer.stateFor(track);
-    return `${state.gain}:${state.muted}:${state.solo}`;
-  }).join('|')}`;
-  if (signature === renderedTrackSignature) return;
-  renderedTrackSignature = signature;
-  trackCountEl.textContent = String(tracks.length);
-  trackEmptyEl.hidden = tracks.length > 0;
-  trackListEl.replaceChildren();
-  trackMeterEls.clear();
-
-  tracks.forEach((track) => {
-    const state = mixer.stateFor(track);
-    const strip = document.createElement('section');
-    strip.className = `track-strip${state.muted ? ' muted' : ''}${state.solo ? ' solo' : ''}`;
-    strip.style.setProperty('--track-color', track.colour);
-    strip.tabIndex = 0;
-    strip.setAttribute('aria-label', `${track.name}, line ${track.line}`);
-    strip.addEventListener('click', () => focusTrack(track));
-    strip.addEventListener('keydown', (event) => { if (event.key === 'Enter') focusTrack(track); });
-
-    const name = document.createElement('div');
-    name.className = 'track-name';
-    name.textContent = track.name;
-    const meta = document.createElement('div');
-    meta.className = 'track-meta';
-    meta.textContent = `line ${track.line} · ${Math.round(state.gain * 100)}%`;
-
-    const meter = document.createElement('div');
-    meter.className = 'track-meter';
-    meter.setAttribute('aria-hidden', 'true');
-    const meterFill = document.createElement('span');
-    meter.appendChild(meterFill);
-    trackMeterEls.set(track.key, { fill: meterFill, track, level: -1 });
-
-    const controls = document.createElement('div');
-    controls.className = 'track-controls';
-    const mute = document.createElement('button');
-    mute.type = 'button';
-    mute.className = `track-button${state.muted ? ' active' : ''}`;
-    mute.textContent = 'M';
-    mute.setAttribute('aria-label', `${state.muted ? 'Unmute' : 'Mute'} ${track.name}`);
-    mute.addEventListener('click', (event) => { event.stopPropagation(); toggleTrackMute(track); });
-
-    const solo = document.createElement('button');
-    solo.type = 'button';
-    solo.className = `track-button${state.solo ? ' active' : ''}`;
-    solo.textContent = 'S';
-    solo.setAttribute('aria-label', `${state.solo ? 'Clear solo for' : 'Solo'} ${track.name}`);
-    solo.addEventListener('click', (event) => { event.stopPropagation(); toggleTrackSolo(track); });
-
-    const gain = document.createElement('input');
-    gain.type = 'range';
-    gain.className = 'track-gain';
-    gain.min = '0'; gain.max = '1.5'; gain.step = '0.05'; gain.value = String(state.gain);
-    gain.setAttribute('aria-label', `${track.name} gain`);
-    gain.addEventListener('click', (event) => event.stopPropagation());
-    gain.addEventListener('input', (event) => {
-      event.stopPropagation();
-      const next = Number(event.target.value);
-      mixer.update(track, { gain: next });
-      meta.textContent = `line ${track.line} · ${Math.round(next * 100)}%`;
-    });
-    controls.append(mute, solo, gain);
-    strip.append(name, meta, meter, controls);
-    trackListEl.appendChild(strip);
-  });
-}
-
-const tracksButtonEl = document.getElementById('tracks-btn');
-const collapseTracksButtonEl = document.getElementById('collapse-tracks-btn');
-const railResizerEl = document.getElementById('rail-resizer');
-const savedRailWidth = Math.max(132, Math.min(340, Number(localStorage.getItem('strood_rail_width')) || 178));
-document.documentElement.style.setProperty('--rail-width', `${savedRailWidth}px`);
-
-function setTracksCollapsed(collapsed) {
-  document.body.classList.toggle('tracks-collapsed', collapsed);
-  tracksButtonEl.classList.toggle('active', !collapsed);
-  tracksButtonEl.setAttribute('aria-pressed', String(!collapsed));
-  collapseTracksButtonEl.setAttribute('aria-label', collapsed ? 'Expand track rail' : 'Collapse track rail');
-  collapseTracksButtonEl.textContent = collapsed ? '›' : '‹';
-  localStorage.setItem('strood_tracks_collapsed', String(collapsed));
-}
-
-setTracksCollapsed(localStorage.getItem('strood_tracks_collapsed') === 'true');
-tracksButtonEl.addEventListener('click', () => setTracksCollapsed(!document.body.classList.contains('tracks-collapsed')));
-collapseTracksButtonEl.addEventListener('click', () => setTracksCollapsed(true));
-
-function setRailWidth(value) {
-  const width = Math.max(132, Math.min(340, Number(value)));
-  document.documentElement.style.setProperty('--rail-width', `${width}px`);
-  railResizerEl.setAttribute('aria-valuenow', String(Math.round(width)));
-  localStorage.setItem('strood_rail_width', String(width));
-}
-
-railResizerEl.setAttribute('aria-valuemin', '132');
-railResizerEl.setAttribute('aria-valuemax', '340');
-railResizerEl.setAttribute('aria-valuenow', String(savedRailWidth));
-railResizerEl.addEventListener('pointerdown', (event) => {
-  event.preventDefault();
-  railResizerEl.setPointerCapture(event.pointerId);
-  const move = (moveEvent) => setRailWidth(moveEvent.clientX);
-  const stop = () => {
-    railResizerEl.removeEventListener('pointermove', move);
-    railResizerEl.removeEventListener('pointerup', stop);
-    railResizerEl.removeEventListener('pointercancel', stop);
-  };
-  railResizerEl.addEventListener('pointermove', move);
-  railResizerEl.addEventListener('pointerup', stop);
-  railResizerEl.addEventListener('pointercancel', stop);
-});
-railResizerEl.addEventListener('keydown', (event) => {
-  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-  event.preventDefault();
-  const current = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rail-width')) || savedRailWidth;
-  setRailWidth(current + (event.key === 'ArrowRight' ? 8 : -8));
-});
-
 createVisualizerModeController(document.getElementById('visualizer-mode'));
-masterVolumeEl.value = String(getMasterGain());
-masterVolumeEl.addEventListener('input', () => setMasterGain(masterVolumeEl.value));
 
 let meterFrame = 0;
 let masterLevel = -1;
@@ -720,7 +563,7 @@ function updateMasterMeter() {
     meterFrame = 0;
     return;
   }
-  let meter = { rmsDb: -Infinity, peakDb: -Infinity, compressionDb: 0 };
+  let meter = { rmsDb: -Infinity, peakDb: -Infinity, compressionDb: 0, limiterDb: 0 };
   try {
     meter = readMasterMeter();
   } catch (_) {}
@@ -732,21 +575,13 @@ function updateMasterMeter() {
     masterPeak = peakPercent;
     masterPeakEl.style.left = `${peakPercent}%`;
   }
-  const hot = meter.peakDb > -1.1 || meter.compressionDb < -5;
-  const nextLimiterLabel = hot ? `lim ${meter.compressionDb.toFixed(1)} dB` : 'safe';
+  const hot = meter.peakDb > -1.1 || meter.limiterDb < -0.2;
+  const nextLimiterLabel = hot ? `lim ${meter.limiterDb.toFixed(1)} dB` : 'safe';
   if (nextLimiterLabel !== limiterLabel) {
     limiterLabel = nextLimiterLabel;
     limiterStateEl.textContent = limiterLabel;
     limiterStateEl.classList.toggle('hot', hot);
   }
-  for (const entry of trackMeterEls.values()) {
-    const { fill, track } = entry;
-    let trackDb = -Infinity;
-    try { trackDb = mixer.meterFor(track).rmsDb; } catch (_) {}
-    const trackLevel = Math.max(0, Math.min(1, (trackDb + 54) / 54));
-    entry.level = setMeterScale(fill, trackLevel, entry.level);
-  }
-
   let nextCycle = 'cycle 1';
   let nextSection = currentSections[0]?.name || '';
   if (isPlaying) {
@@ -1314,7 +1149,6 @@ async function saveSong() {
       result = await writeSong(name, code, null);
     }
     currentSongName = name;
-    mixer.setSong(name);
     currentSongVersion = result.version;
     lastSavedCode = code;
     pendingExternalUpdate = null;
@@ -1348,11 +1182,9 @@ function loadSong(code, name = null, version = null, savedCode = code) {
     localStorage.removeItem('strudel_song_name');
   }
   pendingExternalUpdate = null;
-  mixer.setSong(name);
   currentSections = parseSections(code);
   clearDiagnostic();
   updateDocumentState();
-  renderTracks();
   closeSongBrowser();
 }
 
@@ -1591,6 +1423,9 @@ function closeSongBrowser() {
 editor.editor.dom.addEventListener('keydown', onEditorKeydown, { capture: true });
 editor.editor.contentDOM.setAttribute('aria-label', 'Song code');
 editor.editor.scrollDOM.tabIndex = 0;
+editorsContainer.addEventListener('strood:inline-control-commit', () => {
+  if (isPlaying) evaluateAll().catch(() => {});
+});
 document.getElementById('diagnostic-close').addEventListener('click', clearDiagnostic);
 runBtn.addEventListener('click', () => evaluateAll().catch(() => {}));
 stopBtn.addEventListener('click', () => { clearQueuedUpdate(); editor.stop(); });
@@ -1600,7 +1435,6 @@ document.getElementById('new-btn').addEventListener('click', newSong);
 document.getElementById('patch-btn').addEventListener('click', () => openPatchEditor().catch(showDiagnostic));
 songNameEl.addEventListener('click', showSongBrowser);
 updateMode();
-renderTracks();
 updateMasterMeter();
 
 /* ── Startup: restore last synced song from disk ────────── */

@@ -1,5 +1,3 @@
-const TRACK_COLOURS = ['#56d4dd', '#f07178', '#e6b450', '#7ee787', '#c792ea', '#ff9e64', '#82aaff'];
-const MASTER_GAIN_MARKER = '// strood-track-gain';
 const TRACK_START = /^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\$|\$):/;
 const TRACK_DIRECTIVE = /^\/\/\s*@track\s+([A-Za-z0-9_-]+)(?:\s*\|\s*(.+))?$/i;
 
@@ -43,7 +41,6 @@ export function parseTracks(code) {
       break;
     }
     const block = lines.slice(lineIndex, endLine).join('\n').replace(/\n+$/, '');
-    const gainMatch = block.match(/\)\.gain\((\d*\.?\d+)\)\s*\/\/ strood-track-gain\s*$/);
     const sourceLabel = lines[lineIndex].match(TRACK_START)?.[1];
     const name = label || sourceLabel || `Track ${index + 1}`;
     const orbitMatch = block.match(/\.orbit\(\s*(\d+)\s*\)/);
@@ -56,9 +53,6 @@ export function parseTracks(code) {
       start: offsets[lineIndex],
       end: endLine < lines.length ? offsets[endLine] : code.length,
       orbit: orbitMatch ? Number(orbitMatch[1]) : index + 1,
-      gain: gainMatch ? Number(gainMatch[1]) : 1,
-      muted: gainMatch ? Number(gainMatch[1]) === 0 : false,
-      colour: TRACK_COLOURS[index % TRACK_COLOURS.length],
     };
   });
 }
@@ -79,27 +73,6 @@ export function routeTracksForPlayback(code, tracks = parseTracks(code)) {
     routed = routed.slice(0, track.start) + replacement + routed.slice(track.end);
   }
   return routed;
-}
-
-export function setTrackGain(code, trackIndex, gain) {
-  const tracks = parseTracks(code);
-  const track = tracks[trackIndex];
-  if (!track) return code;
-  const value = Math.max(0, Math.min(1.5, Number(gain))).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
-  const before = code.slice(0, track.start);
-  const after = code.slice(track.end);
-  let block = code.slice(track.start, track.end).replace(/\n+$/, '');
-  const trailing = code.slice(track.start, track.end).slice(block.length);
-
-  const markedGain = /\)\.gain\((\d*\.?\d+)\)\s*\/\/ strood-track-gain\s*$/;
-  if (markedGain.test(block)) {
-    block = block.replace(markedGain, `).gain(${value}) ${MASTER_GAIN_MARKER}`);
-  } else {
-    const markerIndex = block.indexOf('$:');
-    if (markerIndex === -1) return code;
-    block = `${block.slice(0, markerIndex + 2)} (${block.slice(markerIndex + 2).trimStart()}).gain(${value}) ${MASTER_GAIN_MARKER}`;
-  }
-  return before + block + trailing + after;
 }
 
 export function trackLineRange(code, trackIndex) {

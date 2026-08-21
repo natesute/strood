@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseTracks, routeTracksForPlayback, setTrackGain } from '../src/tracks.js';
+import { parseTracks, routeTracksForPlayback } from '../src/tracks.js';
 
 const song = `setcpm(120/4)
 // BASS
@@ -15,17 +15,6 @@ describe('track parsing', () => {
     expect(tracks).toHaveLength(3);
     expect(tracks.map((track) => track.name)).toEqual(['BASS', 'DRUMS', 'Track 3']);
     expect(song.slice(tracks[0].start, tracks[0].end)).not.toContain('// DRUMS');
-  });
-
-  it('adds and updates a visible master gain without swallowing the next section header', () => {
-    const lowered = setTrackGain(song, 0, 0.65);
-    expect(lowered).toContain('$: (note("c2 e2").sound("sawtooth")).gain(0.65) // strood-track-gain');
-    expect(lowered).toContain('\n\n// DRUMS\n$: s("bd sd")');
-    expect(parseTracks(lowered)[0].gain).toBe(0.65);
-
-    const muted = setTrackGain(lowered, 0, 0);
-    expect(parseTracks(muted)[0].muted).toBe(true);
-    expect(muted.match(/strood-track-gain/g)).toHaveLength(1);
   });
 
   it('uses named pattern labels, explicit track metadata, and stable playback orbits', () => {

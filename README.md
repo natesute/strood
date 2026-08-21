@@ -1,6 +1,6 @@
 # Strood
 
-Strood is a local live-coding studio built on Strudel. Write a song as code, hear changes immediately, mix its tracks, build modular synth patches and keep the source as ordinary files on disk.
+Strood is a local live-coding studio built on Strudel. Write a song as code, hear changes immediately, shape its sound, build modular synth patches and keep the source as ordinary files on disk.
 
 ## Start it
 
@@ -15,7 +15,7 @@ Open [http://localhost:5173](http://localhost:5173).
 ## Working with songs
 
 - Press `Ctrl/⌘ + Enter` to run the whole song, `Shift + Enter` to run the current line and `Ctrl/⌘ + .` to stop.
-- Use the track rail to jump to a track, mute or solo it, or change its gain. Gain changes are written back into the song code.
+- Master tracks in the song source. Drag underlined numbers, use the small arrows beside finite choices and click highlighted booleans; every interaction rewrites the visible code.
 - Add editor columns with `Ctrl/⌘ + Shift + →`. Every column is a linked view of the same document, so edits remain synchronised.
 - Save and open songs from the transport bar. The song browser supports search, rename, duplicate, version history and recoverable deletion.
 - Strood keeps local recovery snapshots after edits and before risky operations. They appear alongside saved history when you open a song's History view.

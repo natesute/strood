@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { effectiveTrackGains } from '../src/mixer-state.js';
 import { parseSections, sectionAtCycle, nextCycleTiming } from '../src/song-metadata.js';
 import { requiredSamplePacks } from '../src/sample-loader.js';
 import { needsModularSynth, referencedPatchSounds } from '../src/optional-systems.js';
+import { findInlineControls, formatInlineNumber } from '../src/inline-controls.js';
 import { insertPatchMacro, listPatchMacros } from '../synth-modules/macros.mjs';
 
 describe('performance metadata', () => {
@@ -14,17 +14,6 @@ describe('performance metadata', () => {
 
   it('calculates the next cycle boundary', () => {
     expect(nextCycleTiming(2.25, 0.5, 0)).toEqual({ targetCycle: 3, milliseconds: 1500 });
-  });
-});
-
-describe('runtime mixer', () => {
-  const tracks = [{ key: 'lead' }, { key: 'bass' }];
-
-  it('applies gain, mute, and solo without source transformations', () => {
-    expect(effectiveTrackGains(tracks, { lead: { gain: 0.8 }, bass: { gain: 0.6, muted: true } }))
-      .toEqual({ lead: 0.8, bass: 0 });
-    expect(effectiveTrackGains(tracks, { lead: { gain: 0.8 }, bass: { gain: 0.6, solo: true } }))
-      .toEqual({ lead: 0, bass: 0.6 });
   });
 });
 
@@ -53,5 +42,29 @@ describe('lazy assets and reusable patch subgraphs', () => {
     expect(new Set(group.modules).size).toBe(7);
     expect(patch.routing).toHaveLength(3);
     expect(patch.matrix).toHaveLength(4);
+  });
+});
+
+describe('source-backed inline controls', () => {
+  it('finds mastering numbers, booleans, sounds, colours and track solo choices', () => {
+    const code = `const master = .9
+const solo = 'all'
+// @track lead | Lead
+lead$: note("c4").sound("sine").color("cyan").orbit(1)
+  .gain(.8)
+const settings = { gain: 1.05, pan: .4, mute: false }`;
+    const controls = findInlineControls(code);
+    expect(controls.filter(({ type }) => type === 'number').map(({ name }) => name))
+      .toEqual(['master', 'orbit', 'gain', 'gain', 'pan']);
+    expect(controls.filter(({ type }) => type === 'choice').map(({ name }) => name))
+      .toEqual(['solo', 'sound', 'color']);
+    expect(controls.find(({ name }) => name === 'solo').options).toEqual(['all', 'lead']);
+    expect(controls.find(({ type }) => type === 'boolean')).toMatchObject({ name: 'mute', value: 'false' });
+  });
+
+  it('preserves compact decimal style while scrubbing', () => {
+    expect(formatInlineNumber(0.75, 0.01, '.8')).toBe('.75');
+    expect(formatInlineNumber(1, 0.01, '.8')).toBe('1');
+    expect(formatInlineNumber(640, 10, '650')).toBe('640');
   });
 });
