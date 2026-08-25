@@ -987,6 +987,7 @@ function updateMasterMeter() {
   }
   const level = Math.max(0, Math.min(1, (meter.rmsDb + 60) / 60));
   const peak = Math.max(0, Math.min(1, (meter.peakDb + 60) / 60));
+  document.dispatchEvent(new CustomEvent('strood:master-meter', { detail: { level, peak } }));
   masterLevel = setMeterScale(masterLevelEl, level, masterLevel);
   const peakPercent = Math.round(peak * 100);
   if (peakPercent !== masterPeak) {

@@ -310,7 +310,8 @@ summary:focus-visible,
   border-radius: 3px;
   background: #070a0f;
 }
-.graph-visualizers-toggle {
+.graph-visualizers-toggle,
+.graph-background-toggle {
   height: 30px;
   flex: 0 0 auto;
   align-self: center;
@@ -328,12 +329,15 @@ summary:focus-visible,
   text-transform: uppercase;
 }
 .graph-visualizers-toggle:hover,
-.graph-visualizers-toggle:focus-visible {
+.graph-visualizers-toggle:focus-visible,
+.graph-background-toggle:hover,
+.graph-background-toggle:focus-visible {
   border-color: #526174;
   color: #dce4eb;
   outline: none;
 }
-.graph-visualizers-toggle svg {
+.graph-visualizers-toggle svg,
+.graph-background-toggle svg {
   width: 13px;
   height: 13px;
   fill: none;
@@ -342,6 +346,8 @@ summary:focus-visible,
   stroke-linejoin: miter;
   stroke-width: 1.25;
 }
+.graph-background-label { min-width: 24px; text-align: left; }
+#graph-view:not([data-background="off"]) .graph-background-toggle { color: var(--cyan); }
 .graph-visualizers-toggle i {
   position: relative;
   width: 22px;
@@ -445,6 +451,7 @@ summary:focus-visible,
   color: #171104;
 }
 .graph-viewport {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -457,6 +464,19 @@ summary:focus-visible,
     linear-gradient(90deg, rgba(120, 138, 160, 0.035) 1px, transparent 1px);
   background-size: 24px 24px;
 }
+.graph-background-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+#graph-view[data-background="sky"] .graph-edge { stroke: rgba(226, 239, 255, 0.85); }
+#graph-view[data-background="sky"] .graph-visual-edge { stroke: rgba(196, 250, 255, 0.9); }
+#graph-view[data-background="sky"] .graph-empty { color: #e2efff; }
+#graph-view[data-background="dusk"] .graph-edge { stroke: rgba(236, 212, 244, 0.75); }
+#graph-view[data-background="dusk"] .graph-visual-edge { stroke: rgba(255, 214, 235, 0.85); }
+#graph-view[data-background="dusk"] .graph-empty { color: #ecd4f4; }
 .graph-viewport:focus-visible { box-shadow: inset 0 0 0 1px var(--amber); }
 .graph-viewport.is-background-panning { cursor: grabbing; user-select: none; }
 .graph-stage { position: relative; width: 100%; height: 100%; overflow: hidden; }

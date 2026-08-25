@@ -4,6 +4,12 @@
     {
       "name": "strood-dev",
       "url": "http://localhost:5173"
+    },
+    {
+      "name": "strood-dev-run",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
     }
   ]
 }

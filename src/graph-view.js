@@ -10,6 +10,11 @@ import {
   toggleTrackMute,
   toggleTrackSolo,
 } from './graph-model.js';
+import {
+  createGraphBackground,
+  cycleBackgroundMode,
+  resolveBackgroundMode,
+} from './graph-background.js';
 import { createOrthogonalRouter, orthogonalPath } from './orthogonal-router.js';
 import { parseSections, sectionAtCycle, setSelectedSongSection } from './song-metadata.js';
 
@@ -25,6 +30,7 @@ const GRAPH_PADDING_Y = 24;
 const LAYOUT_PREFIX = 'strood:graph-layout:v9:';
 const VIEW_KEY = 'strood:workspace-view';
 const VISUALIZERS_KEY = 'strood:visualizers-enabled';
+const BACKGROUND_KEY = 'strood:graph-background';
 const MIN_GRAPH_SCALE = .18;
 const MAX_GRAPH_SCALE = 2.4;
 const GRAPH_STAGE_PADDING = 12;
@@ -251,6 +257,8 @@ export function createGraphViewController({
   const sectionCycle = root.querySelector('.graph-section-cycle');
   const sectionStrip = root.querySelector('.graph-section-strip');
   const visualizersToggle = root.querySelector('.graph-visualizers-toggle');
+  const backgroundToggle = root.querySelector('.graph-background-toggle');
+  const backgroundLabel = backgroundToggle.querySelector('.graph-background-label');
   let graph = buildSongGraph(getCode());
   let nodeElements = new Map();
   let currentLayout = {};
@@ -296,6 +304,7 @@ export function createGraphViewController({
   };
 
   const graphVisibleCanvases = globalThis.__stroodGraphVisibleCanvases ||= new Set();
+  const background = createGraphBackground({ viewport });
   const palette = document.createElement('div');
   palette.className = 'graph-visualizer-palette';
   palette.setAttribute('role', 'menu');
@@ -687,6 +696,7 @@ export function createGraphViewController({
       ? `translate3d(${displayX}px, ${displayY}px, 0) scale(${surfaceScale})`
       : `translate(${displayX}px, ${displayY}px) scale(${surfaceScale})`;
     root.dataset.graphScale = surfaceScale.toFixed(3);
+    background.setCamera(cameraX, cameraY);
   }
 
   function settleGraphCamera() {
@@ -1289,6 +1299,16 @@ export function createGraphViewController({
     window.setTimeout(render, 0);
   }
 
+  function setBackgroundMode(id, { persist = true } = {}) {
+    const mode = resolveBackgroundMode(id);
+    background.setMode(mode.id);
+    root.dataset.background = mode.id;
+    backgroundLabel.textContent = mode.label;
+    backgroundToggle.setAttribute('aria-label', `Graph background: ${mode.label}. Change background`);
+    backgroundToggle.title = `Background: ${mode.label} (click to change)`;
+    if (persist) localStorage.setItem(BACKGROUND_KEY, mode.id);
+  }
+
   function setVisualizersEnabled(enabled, { persist = true } = {}) {
     visualizersEnabled = Boolean(enabled);
     globalThis.__stroodVisualizersEnabled = visualizersEnabled;
@@ -1360,6 +1380,7 @@ export function createGraphViewController({
   function setMode(mode) {
     active = mode === 'graph';
     root.hidden = !active;
+    background.setActive(active);
     editors.hidden = active;
     codeButton.setAttribute('aria-pressed', String(!active));
     graphButton.setAttribute('aria-pressed', String(active));
@@ -1391,6 +1412,8 @@ export function createGraphViewController({
   graphButton.addEventListener('click', () => setMode('graph'));
   const handleVisualizersToggle = () => setVisualizersEnabled(!visualizersEnabled);
   visualizersToggle.addEventListener('click', handleVisualizersToggle);
+  const handleBackgroundToggle = () => setBackgroundMode(cycleBackgroundMode(background.mode));
+  backgroundToggle.addEventListener('click', handleBackgroundToggle);
   const handleDocumentPointerDown = (event) => {
     if (!palette.hidden && !palette.contains(event.target) && event.target !== paletteTrigger) {
       closeVisualizerPalette();
@@ -1419,6 +1442,7 @@ export function createGraphViewController({
   window.addEventListener('resize', handleViewportResize);
 
   setVisualizersEnabled(visualizersEnabled, { persist: false });
+  setBackgroundMode(localStorage.getItem(BACKGROUND_KEY) || 'sky', { persist: false });
   const initialMode = localStorage.getItem(VIEW_KEY) === 'graph' ? 'graph' : 'code';
   setMode(initialMode);
 
@@ -1439,6 +1463,8 @@ export function createGraphViewController({
       stopMirrors();
       closeVisualizerPalette();
       palette.remove();
+      background.destroy();
+      backgroundToggle.removeEventListener('click', handleBackgroundToggle);
       document.removeEventListener('pointerdown', handleDocumentPointerDown);
       document.removeEventListener('strood:visualizer-canvas', startMirrors);
       root.removeEventListener('keydown', handleRootKeydown);
