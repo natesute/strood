@@ -22,7 +22,17 @@ export function saveRecoverySnapshot(name, code, reason = 'edit') {
     reason,
     createdAt: Date.now(),
   });
-  localStorage.setItem(RECOVERY_KEY, JSON.stringify(snapshots.slice(0, MAX_SNAPSHOTS)));
+  const trimmed = snapshots.slice(0, MAX_SNAPSHOTS);
+  // Recovery must never break the caller's save path: on quota errors keep
+  // halving the snapshot count, and give up silently if even one won't fit.
+  for (let keep = trimmed.length; keep > 0; keep = Math.floor(keep / 2)) {
+    try {
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify(trimmed.slice(0, keep)));
+      return;
+    } catch {
+      // quota exceeded — retry with fewer snapshots
+    }
+  }
 }
 
 export function listRecoverySnapshots(name = null) {

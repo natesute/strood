@@ -51,6 +51,16 @@ function decodeSegment(value) {
   try { return decodeURIComponent(value); } catch { return null; }
 }
 
+function parseJsonBody(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const error = new Error('Request body is not valid JSON');
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
 function historyFolder(name) {
   return path.join(HISTORY_DIR, crypto.createHash('sha1').update(name).digest('hex').slice(0, 16));
 }
@@ -70,6 +80,7 @@ function liveSyncPlugin() {
     name: 'live-sync',
     configureServer(server) {
       let activeFile = null;
+      let activeName = null;
       let lastWrittenContent = null;
 
       server.watcher.on('change', async (filePath) => {
@@ -78,7 +89,7 @@ function liveSyncPlugin() {
           const content = await fs.promises.readFile(filePath, 'utf8');
           if (content === lastWrittenContent) return;
           lastWrittenContent = content;
-          server.hot.send('strudel:update', { code: content, version: versionOf(content) });
+          server.hot.send('strudel:update', { name: activeName, code: content, version: versionOf(content) });
         } catch (error) {
           server.config.logger.warn(`[strood] Could not sync ${filePath}: ${error.message}`);
         }
@@ -88,6 +99,7 @@ function liveSyncPlugin() {
         const filePath = safeFile(SONGS_DIR, data?.name, '.strudel');
         if (!filePath) return;
         activeFile = filePath;
+        activeName = data.name;
         if (!fs.existsSync(filePath)) await atomicWrite(filePath, data.code || '');
         lastWrittenContent = await fs.promises.readFile(filePath, 'utf8');
         server.watcher.add(filePath);
@@ -143,7 +155,7 @@ function songsApi() {
           const renameMatch = url.pathname.match(/^\/api\/songs\/([^/]+)\/rename$/);
           if (req.method === 'POST' && renameMatch) {
             const from = decodeSegment(renameMatch[1]);
-            const payload = JSON.parse(await readBody(req, 4096));
+            const payload = parseJsonBody(await readBody(req, 4096));
             const to = payload?.name;
             const fromPath = safeFile(SONGS_DIR, from, '.strudel');
             const toPath = safeFile(SONGS_DIR, to, '.strudel');
@@ -243,7 +255,7 @@ function patchesApi() {
 
           if (req.method === 'PUT') {
             const raw = await readBody(req, MAX_PATCH_BYTES);
-            const patch = JSON.parse(raw);
+            const patch = parseJsonBody(raw);
             if (!validPatch(patch)) return sendJson(res, 422, { code: 'invalid_patch', message: 'Patch must contain modules and routing' });
             await atomicWrite(filePath, JSON.stringify(patch, null, 2));
             return sendJson(res, 200, { ok: true });
