@@ -16,8 +16,8 @@ const FRAME_INTERVAL = 40;
 const MAX_SPRITES = 4096;
 const PARALLAX = 0.07;
 const DENSITY_FREQ = 0.048;
-const DRIFT_SPEED = 0.05;
-const EVOLVE_SPEED = 0.095;
+const DRIFT_SPEED = 0.045;
+const EVOLVE_SPEED = 0.012;
 const CHARS = [' ', '.', '·', '∙', '◦', '∘', '•', '○', '◎', '◉', '●'];
 const RAMP = [
   [1, 2, 1],
@@ -279,7 +279,7 @@ export function createGraphBackground({ viewport }) {
     const delta = Math.min(0.25, Math.max(0, (now - lastFrame) / 1000));
     lastFrame = now;
     audioSmooth += (audioTarget - audioSmooth) * Math.min(1, delta * 3);
-    clock += delta * (1 + audioSmooth * 1.1);
+    clock += delta * (1 + audioSmooth * 0.35);
     paint();
   }
 
