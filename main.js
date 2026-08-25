@@ -279,11 +279,41 @@ function schedulerCycle() {
   }
 }
 
+let cachedAllCode = null;
+let cachedSelectedSection = null;
+let sectionsCacheSource = null;
+let sectionsCacheValue = null;
+
+function invalidateCodeCaches() {
+  cachedAllCode = null;
+}
+
+function getAllCodeCached() {
+  if (cachedAllCode === null) {
+    cachedAllCode = getAllCode();
+    cachedSelectedSection = selectedSongSection(cachedAllCode);
+  }
+  return cachedAllCode;
+}
+
+function parseSectionsCached(source) {
+  if (source !== sectionsCacheSource) {
+    sectionsCacheSource = source;
+    sectionsCacheValue = parseSections(source);
+  }
+  return sectionsCacheValue;
+}
+
+function selectedSongSectionCached() {
+  getAllCodeCached();
+  return cachedSelectedSection;
+}
+
 function graphPerformanceSnapshot() {
-  const source = lastEvalCode || getAllCode();
-  const sections = parseSections(source);
+  const source = lastEvalCode || getAllCodeCached();
+  const sections = parseSectionsCached(source);
   const totalCycles = Math.max(0, ...sections.map(({ end }) => end));
-  const selected = selectedSongSection(getAllCode());
+  const selected = selectedSongSectionCached();
   let cycle = selected?.start || 0;
   if (isPlaying) {
     const elapsed = Math.max(0, schedulerCycle() - playbackSchedulerCycle);
@@ -502,6 +532,7 @@ const customHighlight = HighlightStyle.define([
 let wrapEnabled = true;
 const documentChangeListener = EditorView.updateListener.of((viewUpdate) => {
   if (!viewUpdate.docChanged) return;
+  invalidateCodeCaches();
   syncDocumentChanges(editor.editor, viewUpdate.transactions);
   updateDocumentState();
   debouncedSave();
@@ -1000,7 +1031,7 @@ function updateMasterMeter() {
     limiterStateEl.textContent = limiterLabel;
     limiterStateEl.classList.toggle('hot', hot);
   }
-  syncGraphPerformance();
+  if (graphController?.isActive()) syncGraphPerformance();
   scheduleMeterUpdate();
 }
 

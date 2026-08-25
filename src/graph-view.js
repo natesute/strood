@@ -284,6 +284,7 @@ export function createGraphViewController({
   let activityStates = new Map();
   let lastActivations = [];
   let sectionSignature = '';
+  let performanceSignature = '';
   let visualizersEnabled = localStorage.getItem(VISUALIZERS_KEY) !== 'false';
   let performanceState = {
     playing: false,
@@ -952,6 +953,17 @@ export function createGraphViewController({
       ? ((Number(performanceState.cycle) % totalCycles) + totalCycles) % totalCycles
       : 0;
     const current = performanceState.currentSection || sectionAtCycle(sections, cycle);
+    const nextPerformanceSignature = [
+      signature,
+      cycle.toFixed(2),
+      current?.name || '',
+      performanceState.queuedSection || '',
+      performanceState.loopedSection || '',
+      performanceState.playing,
+      performanceState.paused,
+    ].join('|');
+    if (nextPerformanceSignature === performanceSignature) return;
+    performanceSignature = nextPerformanceSignature;
     sectionName.textContent = current?.name || 'No arrangement';
     sectionCycle.textContent = current
       ? `bar ${Math.floor(cycle - current.start) + 1}/${Math.max(1, current.end - current.start)}`
@@ -1426,8 +1438,9 @@ export function createGraphViewController({
     setMode,
     setPerformanceState: (next) => {
       performanceState = { ...performanceState, ...next };
-      renderPerformanceState();
+      if (active) renderPerformanceState();
     },
+    isActive: () => active,
     refresh: () => active && render(),
     scheduleRefresh,
     destroy: () => {
