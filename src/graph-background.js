@@ -15,8 +15,13 @@ const FONT_STACK = '"Fragment Mono", ui-monospace, SFMono-Regular, Menlo, monosp
 const FRAME_INTERVAL = 40;
 const MAX_SPRITES = 4096;
 const DENSITY_FREQ = 0.048;
-const DRIFT_SPEED = 0.045;
+const WIND_SPEED = 10;
 const EVOLVE_SPEED = 0.012;
+const MIN_SCREEN_CELL = 3;
+const SPRITE_OVERSAMPLE = 2;
+const TILE_MARGIN = 0.3;
+const HEAVY_CELLS = 22000;
+const HEAVY_INTERVAL = 120;
 const CHARS = [' ', '.', '·', '∙', '◦', '∘', '•', '○', '◎', '◉', '●'];
 const RAMP = [
   [1, 2, 1],
@@ -169,8 +174,12 @@ export function createGraphBackground({ viewport }) {
   canvas.setAttribute('aria-hidden', 'true');
   viewport.prepend(canvas);
   const context = canvas.getContext('2d', { alpha: false });
+  const tileCanvas = document.createElement('canvas');
+  const tileContext = tileCanvas.getContext('2d');
+  const tile = { left: 0, top: 0, width: 0, height: 0, scale: 1, ready: false };
   const { fbm3 } = createNoise();
   const sprites = new Map();
+  let tileCells = 0;
 
   let mode = BACKGROUND_MODES[0];
   let active = false;
@@ -200,10 +209,10 @@ export function createGraphBackground({ viewport }) {
     if (!cached) {
       if (sprites.size >= MAX_SPRITES) sprites.clear();
       cached = document.createElement('canvas');
-      cached.width = Math.max(1, Math.round(CELL_W * dpr));
-      cached.height = Math.max(1, Math.round(CELL_H * dpr));
+      cached.width = Math.max(1, Math.round(CELL_W * dpr * SPRITE_OVERSAMPLE));
+      cached.height = Math.max(1, Math.round(CELL_H * dpr * SPRITE_OVERSAMPLE));
       const glyph = cached.getContext('2d');
-      glyph.font = `${FONT_SIZE * dpr}px ${FONT_STACK}`;
+      glyph.font = `${FONT_SIZE * dpr * SPRITE_OVERSAMPLE}px ${FONT_STACK}`;
       glyph.textAlign = 'center';
       glyph.textBaseline = 'middle';
       glyph.fillStyle = `hsl(${hueStep * 10} ${satStep * 8}% ${lightStep * 4}%)`;
@@ -213,29 +222,53 @@ export function createGraphBackground({ viewport }) {
     return cached;
   }
 
-  function paint() {
+  // Draw the glyph field into a world-anchored offscreen tile. Pan and zoom
+  // only re-blit this tile through the camera transform (compose), so the
+  // background moves and scales continuously like the graph itself; the
+  // expensive glyph pass here doubles as the wind/evolution animation tick.
+  function renderTile() {
     if (!width || !height || mode.id === 'off') return;
-    const columns = Math.ceil(width / CELL_W);
-    const rows = Math.ceil(height / CELL_H);
-    const gradient = context.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, mode.skyTop);
-    gradient.addColorStop(1, mode.skyBottom);
-    context.fillStyle = gradient;
-    context.fillRect(0, 0, width, height);
+    const worldWidth = width / cameraScale;
+    const worldHeight = height / cameraScale;
+    tile.left = -cameraX / cameraScale - worldWidth * TILE_MARGIN;
+    tile.top = -cameraY / cameraScale - worldHeight * TILE_MARGIN;
+    tile.width = worldWidth * (1 + 2 * TILE_MARGIN);
+    tile.height = worldHeight * (1 + 2 * TILE_MARGIN);
+    tile.scale = cameraScale;
+    const deviceWidth = Math.max(1, Math.round(tile.width * cameraScale * dpr));
+    const deviceHeight = Math.max(1, Math.round(tile.height * cameraScale * dpr));
+    if (tileCanvas.width !== deviceWidth || tileCanvas.height !== deviceHeight) {
+      tileCanvas.width = deviceWidth;
+      tileCanvas.height = deviceHeight;
+    }
+    tileContext.setTransform(
+      dpr * cameraScale, 0, 0, dpr * cameraScale,
+      -tile.left * cameraScale * dpr, -tile.top * cameraScale * dpr,
+    );
+    tileContext.clearRect(tile.left, tile.top, tile.width, tile.height);
 
+    // Only at extreme zoom-out (glyphs under ~3px) coarsen the grid so the
+    // cell count stays bounded; above that the glyphs scale continuously.
+    const lod = 1 << Math.max(0, Math.ceil(Math.log2(MIN_SCREEN_CELL / (CELL_W * cameraScale))));
+    const cellW = CELL_W * lod;
+    const cellH = CELL_H * lod;
     const aspect = CELL_H / CELL_W;
-    const drift = clock * (DRIFT_SPEED / DENSITY_FREQ);
     const evolve = clock * EVOLVE_SPEED;
-    const invScale = 1 / cameraScale;
-    const originX = -cameraX / CELL_W;
-    const originY = -cameraY / CELL_H;
+    const windPx = clock * WIND_SPEED;
     const threshold = 0.47 - audioSmooth * 0.03;
     const glow = audioSmooth * 6;
 
-    for (let row = 0; row < rows; row++) {
-      const sampleY = (row + originY) * invScale * DENSITY_FREQ * aspect;
-      for (let column = 0; column < columns; column++) {
-        const sampleX = ((column + originX) * invScale + drift) * DENSITY_FREQ;
+    const gridX0 = Math.floor((tile.left + windPx) / cellW);
+    const gridX1 = Math.ceil((tile.left + tile.width + windPx) / cellW);
+    const gridY0 = Math.floor(tile.top / cellH);
+    const gridY1 = Math.ceil((tile.top + tile.height) / cellH);
+    tileCells = (gridX1 - gridX0 + 1) * (gridY1 - gridY0 + 1);
+    tile.ready = true;
+
+    for (let row = gridY0; row <= gridY1; row++) {
+      const sampleY = row * lod * DENSITY_FREQ * aspect;
+      for (let column = gridX0; column <= gridX1; column++) {
+        const sampleX = column * lod * DENSITY_FREQ;
         const coverNoise = fbm3(sampleX * 0.32 + 37.2, sampleY * 0.32, evolve * 0.7, 1);
         const cover = smoothstep(0.4, 0.68, coverNoise);
         const shape = fbm3(sampleX, sampleY, evolve, 3);
@@ -260,22 +293,52 @@ export function createGraphBackground({ viewport }) {
           mode.fringeLight + (mode.coreLight - mode.fringeLight) * amount
             + dither + shading + glow * amount,
         );
-        context.drawImage(
+        tileContext.drawImage(
           sprite(charIndex, hue, sat, light),
-          column * CELL_W,
-          row * CELL_H,
-          CELL_W,
-          CELL_H,
+          column * cellW - windPx,
+          row * cellH,
+          cellW,
+          cellH,
         );
       }
     }
+  }
+
+  function compose() {
+    if (!width || !height || mode.id === 'off') return;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const gradient = context.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, mode.skyTop);
+    gradient.addColorStop(1, mode.skyBottom);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, width, height);
+    if (!tile.ready) return;
+    context.drawImage(
+      tileCanvas,
+      tile.left * cameraScale + cameraX,
+      tile.top * cameraScale + cameraY,
+      tile.width * cameraScale,
+      tile.height * cameraScale,
+    );
+  }
+
+  function paint() {
+    renderTile();
+    compose();
   }
 
   function frame(now) {
     rafId = 0;
     if (!shouldAnimate()) return;
     rafId = requestAnimationFrame(frame);
-    if (now - lastFrame < FRAME_INTERVAL && !cameraDirty) return;
+    const interval = tileCells > HEAVY_CELLS ? HEAVY_INTERVAL : FRAME_INTERVAL;
+    if (now - lastFrame < interval) {
+      if (cameraDirty) {
+        cameraDirty = false;
+        compose();
+      }
+      return;
+    }
     cameraDirty = false;
     const delta = Math.min(0.25, Math.max(0, (now - lastFrame) / 1000));
     lastFrame = now;
