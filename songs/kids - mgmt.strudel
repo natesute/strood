@@ -1,0 +1,395 @@
+// MGMT — Kids
+// Chiptune code cover of the Oracular Spectacular arrangement
+// 123 BPM · A major / F# minor · 149-bar form
+samples({
+  kids_vocals: '/audio/kids-vocals.mp3',
+  kids_vocals_tuned_lofi: '/audio/kids-vocals-tuned-lofi.mp3',
+})
+setcpm(123/4)
+
+// Timeline used by Strood's section display
+const arrangement = [
+  { section: 'Opening hook', cycles: 8 },
+  { section: 'Full intro', cycles: 16 },
+  { section: 'Verse one', cycles: 16 },
+  { section: 'Chorus one', cycles: 16 },
+  { section: 'Verse two', cycles: 16 },
+  { section: 'Chorus two', cycles: 16 },
+  { section: 'Baroque bridge', cycles: 8 },
+  { section: 'A pedal dance', cycles: 16 },
+  { section: 'Playground break', cycles: 4 },
+  { section: 'Final double chorus', cycles: 32 },
+  { section: 'Final hit', cycles: 1 },
+]
+
+// Pick this value from its inline menu while playing.
+// Strood queues the jump for the end of the current section, then carries on from there.
+const songPart = 'Playground break'
+
+// Performance mix
+const master = .25
+const solo = 'all'
+const vocalMix = { gain: .88, pan: .5, mute: false }
+const hookMix = { gain: .82, pan: .48, mute: false }
+const claviMix = { gain: .42, pan: .36, mute: false }
+const bassMix = { gain: .9, pan: .5, mute: false }
+const organMix = { gain: .38, pan: .58, mute: false }
+const soloMix = { gain: .62, pan: .54, mute: false }
+const padMix = { gain: .25, pan: .5, mute: false }
+const drumsMix = { gain: .88, pan: .5, mute: false }
+const playgroundMix = { gain: .4, pan: .5, mute: false }
+const track = (
+  name,
+  pattern,
+  { gain = 1, pan = null, mute = false } = {}
+) => {
+  const level = master * gain * (!mute && (solo === 'all' || solo === name) ? 1 : 0)
+  // Multiply the instrument's own gain instead of replacing it. This preserves
+  // the voice and layer balances set inside each instrument declaration.
+  const balanced = pattern.mul({ gain: level })
+  return pan === null ? balanced : balanced.pan(pan)
+}
+
+// The ten-note fairground hook: scale degrees 1–2–3–5–6–7–6–5–3–2
+// Durations live in the melody itself. clip(1) then closes every note exactly
+// at the following note (or at an intentional written rest), with no overlap.
+const hookClassic = note("[a4 ~ b4 ~ c#5 ~ e5 ~ f#5@2 g#5 f#5 ~ e5 ~ c#5@9 b4@8]")
+  .slow(4)
+  .clip(1)
+const hookTurn = note("[a4 ~ b4 ~ c#5 ~ b4 ~ a4@2 b4 a4 ~ f#4 ~ a4@17]")
+  .slow(4)
+  .clip(1)
+const hookSong = arrange(
+  [8, hookClassic],
+  [12, hookClassic], [4, hookTurn],
+  [16, silence],
+  [12, hookClassic], [4, hookTurn],
+  [16, silence],
+  [12, hookClassic], [4, hookTurn],
+  [8, silence],
+  [16, silence],
+  [4, silence],
+  [12, hookClassic], [4, hookTurn], [12, hookClassic], [4, hookTurn],
+  [1, note("f#5")]
+)
+const hookVoice = stack(
+  hookSong.sound("sawtooth").gain(.72),
+  hookSong.sound("square").gain(.24)
+)
+  .vib("4.24:.18")
+  .lpf(1687)
+  .lpq(11)
+  .shape(.2)
+  .postgain(.72)
+  .release(0)
+  ._helix({ size: 190, turns: 4 })
+
+// @track main-hook | Fairground hook
+hook$: track(
+  'main-hook',
+  hookVoice.orbit(1).color("#74f4ff"),
+  hookMix
+)
+
+// The supplied acapella begins on the recording's musical bar-one downbeat.
+// One slice per bar lets section jumps start at the matching place in the stem.
+const vocalBarSlices = [...Array(149).keys()]
+  .join(' ')
+// Swap to 'kids_vocals' here to compare with the untouched recording.
+const vocalSource = 'kids_vocals_tuned_lofi'
+const vocals = s(vocalSource)
+  .slice(149, mini(vocalBarSlices))
+  .slow(149)
+  .clip(1)
+  .gain(1)
+  ._scope({ width: 520, height: 112, scale: 4.5 })
+
+// @track vocal-melody | Hard-tuned lo-fi vocal
+vocal$: track(
+  'vocal-melody',
+  vocals.orbit(9).color("#ff7aa8"),
+  vocalMix
+)
+
+// Thin pulse-wave answer heard under and between statements of the main hook
+const claviPhrase = note("[f#4 ~ f#4 ~ ~ a4 ~ a4 ~ f#4 ~ f#4 a4 ~ b4 c#5@8 g#4@2 a4 g#4 ~ b4 a4 g#4 e4 f#4 ~ f#4 ~ ~ a4 ~ a4 ~ f#4 ~ f#4 a4 f#4 b4 a4@9 d5 c#5 b5 a4@2 b4 a4 g#4]")
+  .slow(8)
+  .clip(1)
+const claviAnswer = note("[[a4,e5]@32 a5@22 [b4,b5] [a4,a5] [g#4,e5,g#5]@8]")
+  .slow(8)
+  .clip(1)
+const claviSong = stack(
+  arrange(
+    [8, silence], [16, claviPhrase], [8, silence], [24, claviPhrase],
+    [16, silence], [16, claviPhrase], [28, silence], [32, claviPhrase],
+    [1, note("f#6")]
+  ),
+  arrange(
+    [8, silence], [16, claviAnswer], [16, silence], [16, claviAnswer],
+    [16, silence], [16, claviAnswer], [28, silence], [32, claviAnswer],
+    [1, silence]
+  )
+)
+const claviVoice = stack(
+  claviSong.sound("square"),
+  claviSong.add(12).sound("square").gain(.3)
+)
+  .lpf(1500)
+  .lpq(4)
+  .shape(.18)
+  .postgain(.55)
+  .release(.09)
+  .delay(".1:.0625:.18")
+  ._orbit({ size: 150 })
+
+// @track pulse-answer | Pulse-wave answer
+clavi$: track(
+  'pulse-answer',
+  claviVoice.orbit(2).color("#ff9b54"),
+  claviMix
+)
+
+// Distorted disco bass: alternating root and octave under F#m7–Dsus2–A–E/G#
+const bassPulse = note("<[f#1 f#2]*4 [d1 d2]*4 [a1 a2]*4 [g#1 g#2]*4>").clip(1)
+const bassRoots = note("<[f#1@3 f#2@5] [d1@3 d2@5] [a1@3 a2@5] [g#1@3 g#2@5]>").clip(1)
+const bridgeBass = note("<[d1,d2] [e1,e2] [f#1,f#2] [g#1,g#2] [a1,a2] [b1,b2] [d2,d3] [g#2,g#3]>").clip(1)
+const aPedalBass = note("[~ [a1,a2]]*4").clip(2)
+const bassSong = arrange(
+  [8, silence],
+  [24, bassPulse],
+  [16, bassPulse],
+  [8, bassPulse],
+  [16, bassRoots],
+  [16, bassPulse],
+  [8, bridgeBass],
+  [16, aPedalBass],
+  [4, silence],
+  [32, bassPulse],
+  [1, note("[f#1,f#2]")]
+)
+const bassVoice = stack(
+  bassSong.sound("sine").gain(.72),
+  bassSong.sound("square").gain(.3),
+  bassSong.add(12).sound("square").gain(.08)
+)
+  .attack(0)
+  .decay(.045)
+  .sustain(.82)
+  .release(0)
+  .lpf(perlin.range(520, 760).slow(8))
+  .lpq(3.2)
+  .ftype("ladder")
+  .drive(1.7)
+  .shape(.34)
+  .postgain(.52)
+  ._lissajous({ size: 170 })
+
+// @track octave-bass | Distorted octave bass
+bass$: track(
+  'octave-bass',
+  bassVoice.orbit(3).color("#328cff"),
+  bassMix
+)
+
+// Square+saw organ with common-tone voicings and an exaggerated vibrato/phaser
+const organLoop = note("<[f#3,a3,c#4,e4] [d3,e3,a3] [a2,c#3,e3,a3] [g#2,b2,e3,g#3]>").clip(1)
+const bridgeChords = note("<[d3,f#3,a3] [e3,g#3,b3] [f#3,a3,c#4] [g#3,b3,d4] [a3,c#4,e4] [b3,d4,f#4] [d4,f#4,a4] [g#3,b3,e4]>").clip(1)
+const organSong = arrange(
+  [8, silence],
+  [24, organLoop],
+  [16, organLoop],
+  [8, organLoop],
+  [16, organLoop],
+  [16, organLoop],
+  [8, bridgeChords],
+  [16, note("[a2,c#3,e3,a3]")],
+  [4, silence],
+  [32, organLoop],
+  [1, note("[f#3,a3,c#4,e4]")]
+)
+const organVoice = stack(
+  organSong.sound("square").gain(.54).pan(.38),
+  organSong.sound("sawtooth").gain(.32).pan(.62).add(.06)
+)
+  .vib("5.65:.24")
+  .lpf(620)
+  .lpq(2.8)
+  .phaser(.42)
+  .phaserdepth(.72)
+  .phasercenter(570)
+  .phasersweep(1200)
+  .shape(.13)
+  .postgain(.52)
+  .release(.25)
+  ._tonnetz({ size: 240 })
+
+// @track synth-organ | Vibrato organ
+organ$: track(
+  'synth-organ',
+  organVoice.orbit(4).color("#df5dff"),
+  organMix
+)
+
+// Mock-baroque bridge, transcribed as sixteenth-note scalar and arpeggio runs
+const baroqueSolo = note("<[f#5 a5 c#6 e6 f#6 e6 d6 c#6 b5 c#6 b5 a5 g#5 a5 g#5 f#5] [g#5 f#5 e5 g#5 b5 e6 d6 c#6 b5 [d6 c#6] b5 a5 g#5 f#5 e5 g#5] [a5 e5 a5 c#6 f#6 e6 d6 c#6 b5 c#6 b5 a5 g#5 a5 g#5 f#5] [e5 f#5 g#5 b5 f#5 g#5 a5 c#6 g#5 a5 b5 d#6 a5 b5 c#6 e6] [c#6 d6 e6 d6 c#6 d6 c#6 b5 a5 b5 a5 g#5 f#5 g#5 f#5 e5] [b4 d5 f#5 a5 b5 c#6 d6 e6 f#6 e6 d6 c#6 b5 a5 g#5 f#5] [a5 c#6 b5 d6 c#6 e6 d6 c#6 b5 c#6 b5 a5 g#5 a5 g#5 f#5] [a4,e5]>").clip(1)
+const soloSong = arrange(
+  [88, silence],
+  [8, baroqueSolo],
+  [20, silence],
+  [32, silence],
+  [1, note("f#6")]
+)
+const soloVoice = soloSong
+  .sound("sawtooth")
+  .lpf(2800)
+  .lpq(6)
+  .shape(.22)
+  .postgain(.58)
+  .release(.12)
+  .delay(".24:.1875:.36")
+  .phaser(.26)
+  .phaserdepth(.35)
+  ._epicycles({ size: 170, harmonicsCount: 7 })
+
+// @track baroque-solo | Baroque bridge solo
+solo$: track(
+  'baroque-solo',
+  soloVoice.orbit(5).color("#ffd166"),
+  soloMix
+)
+
+// Barely audible pad fills the stereo sides without crowding the monophonic hooks
+const padLoop = note("<[f#3,a3,c#4,e4] [d3,e3,a3] [a3,c#4,e4] [g#3,b3,e4]>").clip(1)
+const padSong = arrange(
+  [8, silence],
+  [48, padLoop],
+  [16, padLoop],
+  [16, padLoop],
+  [8, bridgeChords],
+  [16, note("[a3,c#4,e4,a4]")],
+  [4, silence],
+  [32, padLoop],
+  [1, note("[f#3,a3,c#4,e4]")]
+)
+const padVoice = padSong
+  .sound("lush")
+  .lpf(sine.range(1100, 1900).slow(16))
+  .hpf(180)
+  .postgain(.44)
+  .attack(.22)
+  .release(.55)
+  .room(.62)
+  .size(6.5)
+  ._lissajous({ size: 190 })
+
+// @track stereo-pad | Saturated stereo pad
+pad$: track(
+  'stereo-pad',
+  padVoice.orbit(6).color("#a78bfa"),
+  padMix
+)
+
+// Four-on-the-floor stomp, with section-specific fills and an open-hat dance break
+const openingDrums = stack(
+  s("bd sd bd sd").bank("RolandTR909"),
+  s("hh*8").bank("RolandTR909").gain("[.08 .15]*4")
+)
+const mainDrums = stack(
+  s("bd*4").bank("RolandTR909").gain(1.08),
+  s("~ sd ~ sd").bank("RolandTR909").gain(.72),
+  s("hh*8").bank("RolandTR909").gain("[.09 .18]*4").hpf(5200)
+)
+const breakdownDrums = stack(
+  s("bd ~ ~ bd ~ bd ~ ~").bank("RolandTR909").gain(.96),
+  s("~ ~ ~ ~ ~ ~ sd ~").bank("RolandTR909").gain(.45)
+)
+const bridgeDrums = stack(
+  s("bd ~ ~ bd bd ~ ~ ~").bank("RolandTR909"),
+  s("~ sd ~ ~ ~ sd ~ sd").bank("RolandTR909").gain(.62),
+  s("~ lt ~ mt ~ lt mt ~").bank("RolandTR909").gain(.38)
+)
+const dancePulse = stack(
+  s("bd*4").bank("RolandTR909").gain(1.12),
+  s("oh*8").bank("RolandTR909").gain("[.1 .22]*4").hpf(4400)
+)
+const danceGroove = stack(
+  dancePulse,
+  s("~ sd ~ sd").bank("RolandTR909").gain(.78)
+)
+// Six-hit claps from the post-bridge dance: 1& 1a 2 2e 2& 2a.
+const danceClapFill = stack(
+  dancePulse,
+  s("~ ~ cp cp cp cp cp cp ~ ~ ~ ~ sd ~ ~ ~")
+    .bank("RolandTR909")
+    .gain(".5 .5 .62 .68 .74 .7 .76 .82 .5 .5 .5 .5 .78 .5 .5 .5")
+)
+const danceDrums = arrange(
+  [2, danceGroove], [1, danceClapFill],
+  [1, danceGroove], [1, danceClapFill],
+  [3, danceGroove], [1, danceClapFill],
+  [7, danceGroove]
+)
+const finalDrums = stack(
+  mainDrums,
+  s("~ cp ~ cp").bank("RolandTR909").gain(.28),
+  s("~ ~ ~ ~ ~ ~ oh ~").bank("RolandTR909").gain(.2)
+)
+const finalHit = stack(
+  s("bd").bank("RolandTR909"),
+  s("sd").bank("RolandTR909").gain(.75),
+  s("cr").bank("RolandTR909").gain(.55)
+)
+const drumsSong = arrange(
+  [8, openingDrums],
+  [24, mainDrums],
+  [16, mainDrums],
+  [8, mainDrums],
+  [8, breakdownDrums], [7, bridgeDrums],
+  [1, stack(
+    bridgeDrums,
+    s("~ ~ ~ ~ ~ cp cp ~").bank("RolandTR909").gain(.72)
+  )],
+  [16, mainDrums],
+  [8, bridgeDrums],
+  [16, danceDrums],
+  [4, silence],
+  [16, mainDrums], [16, finalDrums],
+  [1, finalHit]
+)
+  .shape(.18)
+  ._orbit({ size: 165 })
+
+// @track drum-machine | Stomp drum machine
+drums$: track(
+  'drum-machine',
+  drumsSong.orbit(7).color("#ff5263"),
+  drumsMix
+)
+
+// A synthesised substitute for the four-bar playground-noise tape break
+const playgroundToys = stack(
+  note("<[e6 b5 g#6 ~] [c#6 ~ a5 e6] [b5 f#6 ~ d6] [a5 ~ e6 c#6]>")
+    .clip(1)
+    .sound("square")
+    .lpf(2600)
+    .delay(".32:.125:.45")
+    .shape(.08),
+  s("white*16")
+    .gain("[.02 .06 .03 .08]*4")
+    .hpf(3800)
+    .lpf(9200)
+    .pan(sine.range(.15, .85).fast(2))
+)
+const playgroundSong = arrange(
+  [112, silence],
+  [4, playgroundToys],
+  [33, silence]
+)
+  ._cymatics({ size: 180 })
+
+// @track playground-tape | Playground tape break
+playground$: track(
+  'playground-tape',
+  playgroundSong.orbit(8).color("#70e890"),
+  playgroundMix
+)
