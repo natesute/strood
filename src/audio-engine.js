@@ -1,4 +1,8 @@
-import { getAudioContext, getSuperdoughAudioController } from '@strudel/webaudio';
+import {
+  getAudioContext,
+  getSuperdoughAudioController,
+  resetGlobalEffects,
+} from '@strudel/webaudio';
 
 let engine = null;
 
@@ -54,6 +58,29 @@ export function ensureMasterEngine() {
 
   engine = { context, controller, source, masterGain, compressor, limiter, analyser, timeData };
   return engine;
+}
+
+export function silenceMasterEngine() {
+  if (engine) {
+    const now = engine.context.currentTime;
+    engine.masterGain.gain.cancelScheduledValues(now);
+    engine.masterGain.gain.setValueAtTime(0, now);
+  }
+  resetGlobalEffects();
+  engine = null;
+  return ensureMasterEngine();
+}
+
+export function setOrbitAudibility(orbit, audible, rampSeconds = 0.01) {
+  const current = ensureMasterEngine();
+  const gain = current.controller.nodes[orbit]?.output?.gain;
+  if (!gain) return false;
+  const now = current.context.currentTime;
+  const value = gain.value;
+  gain.cancelScheduledValues(now);
+  gain.setValueAtTime(value, now);
+  gain.linearRampToValueAtTime(audible ? 1 : 0, now + rampSeconds);
+  return true;
 }
 
 function meterReading(analyser, data) {

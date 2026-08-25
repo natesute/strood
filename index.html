@@ -21,17 +21,24 @@
     <div class="song-identity">
       <span class="eyebrow">song</span>
       <button id="song-name" class="song-name-button" type="button" title="Open songs">Untitled</button>
-      <span id="save-state" class="save-state" role="status" aria-live="polite">Ready</span>
+      <span id="save-state" class="save-state" role="status" aria-live="polite" hidden></span>
+    </div>
+
+    <div class="view-switch" role="group" aria-label="Workspace view">
+      <button id="code-view-btn" type="button" aria-pressed="true">Code</button>
+      <button id="graph-view-btn" type="button" aria-pressed="false">Graph</button>
     </div>
 
     <div class="transport-actions">
-      <button id="run-btn" class="control control-primary" type="button" title="Run or update (Ctrl+Enter)">
-        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>
-        <span>Run</span>
+      <span class="update-slot">
+        <button id="update-btn" class="control control-update" type="button" title="Update playing song (Ctrl+Enter)" hidden>Update</button>
+      </span>
+      <button id="run-btn" class="control control-primary transport-button" type="button" aria-label="Play" title="Play (Ctrl+Enter)">
+        <svg class="transport-icon transport-icon-play" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>
+        <svg class="transport-icon transport-icon-pause" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" hidden><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>
       </button>
-      <button id="stop-btn" class="control" type="button" title="Stop (Ctrl+.)">
-        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>
-        <span>Stop</span>
+      <button id="stop-btn" class="control transport-button transport-stop" type="button" aria-label="Stop" title="Stop (Ctrl+.)" disabled>
+        <svg class="transport-icon" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>
       </button>
       <span class="transport-divider" aria-hidden="true"></span>
       <button id="save-btn" class="control" type="button" title="Save song (Ctrl+S)">Save</button>
@@ -47,6 +54,32 @@
       <div id="editors-container">
         <div id="editor" class="editor-panel" aria-label="Song code editor"></div>
       </div>
+      <section id="graph-view" aria-label="Song graph" hidden>
+        <div class="graph-performance" aria-label="Graph playback controls">
+          <div class="graph-section-readout" aria-live="polite">
+            <span>section</span>
+            <strong class="graph-section-name">No arrangement</strong>
+            <small class="graph-section-cycle"></small>
+          </div>
+          <div class="graph-section-strip" role="group" aria-label="Song sections"></div>
+          <button class="graph-visualizers-toggle" type="button" role="switch" aria-checked="true" title="Turn visualisers off">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M1.5 8h2l1.25-3.2L7 11.2 9.15 6l1.15 2H14.5" />
+            </svg>
+            <span>Visuals</span>
+            <i aria-hidden="true"></i>
+          </button>
+        </div>
+        <div class="graph-viewport" tabindex="0" aria-label="Moveable song graph canvas">
+          <div class="graph-stage">
+            <div class="graph-surface">
+              <svg class="graph-edges" aria-hidden="true" preserveAspectRatio="none"></svg>
+              <div class="graph-nodes"></div>
+              <p class="graph-empty" hidden>Add a named pattern and a track to generate its graph.</p>
+            </div>
+          </div>
+        </div>
+      </section>
       <canvas id="viz" aria-hidden="true"></canvas>
     </main>
   </div>
@@ -62,36 +95,23 @@
 
   <footer id="statusline">
     <span id="mode" class="stopped" role="status">STOPPED</span>
-    <span class="sep" aria-hidden="true">|</span>
-    <span id="info">1:1</span>
-    <span class="sep" aria-hidden="true">|</span>
     <span id="dirty-count"></span>
-    <span id="cycle-status" class="cycle-status">cycle 1</span>
-    <span id="section-status" class="section-status">free play</span>
     <span id="queue-status" class="queue-status" role="status" aria-live="polite"></span>
-    <span id="boot-status" class="boot-status" role="status" aria-live="polite">Audio loads when you run</span>
-    <label class="viz-mode-label">
-      <span>visuals</span>
-      <select id="visualizer-mode" aria-label="Visualiser placement">
-        <option value="inline">inline</option>
-        <option value="dock">dock</option>
-        <option value="hidden">off</option>
-      </select>
-    </label>
     <div class="master" aria-label="Output safety meter">
       <span class="eyebrow">output</span>
       <div class="master-meter" aria-hidden="true"><span id="master-level"></span><i id="master-peak"></i></div>
-      <span id="limiter-state" class="limiter-state">safe</span>
+      <span id="limiter-state" class="limiter-state"></span>
     </div>
     <details class="shortcut-menu">
       <summary>Shortcuts</summary>
       <div class="shortcut-popover">
-        <span><kbd>Ctrl</kbd><kbd>Enter</kbd> Run</span>
+        <span><kbd>Ctrl</kbd><kbd>Enter</kbd> Play / update</span>
         <span><kbd>Ctrl</kbd><kbd>U</kbd> Update now</span>
         <span><kbd>Ctrl</kbd><kbd>.</kbd> Stop</span>
         <span><kbd>Ctrl</kbd><kbd>S</kbd> Save</span>
         <span><kbd>Ctrl</kbd><kbd>O</kbd> Open</span>
         <span><kbd>Ctrl</kbd><kbd>P</kbd> Patch</span>
+        <span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>F</kbd> Performance</span>
         <span><kbd>Ctrl</kbd><kbd>1–3</kbd> Columns</span>
       </div>
     </details>

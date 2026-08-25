@@ -18,14 +18,14 @@ describe('track parsing', () => {
   });
 
   it('uses named pattern labels, explicit track metadata, and stable playback orbits', () => {
-    const named = `// @track lead | Lead voice\nlead$: note("c4")\n\nbass$: note("c2").orbit(7)`;
+    const named = `// @track lead | Lead voice\nlead$: note("c4").color("cyan")\n\nbass$: note("c2").orbit(7).color("#ff8844")`;
     const tracks = parseTracks(named);
-    expect(tracks.map(({ key, name, orbit }) => ({ key, name, orbit }))).toEqual([
-      { key: 'lead', name: 'Lead voice', orbit: 1 },
-      { key: 'bass', name: 'bass', orbit: 7 },
+    expect(tracks.map(({ key, name, orbit, color }) => ({ key, name, orbit, color }))).toEqual([
+      { key: 'lead', name: 'Lead voice', orbit: 1, color: 'cyan' },
+      { key: 'bass', name: 'bass', orbit: 7, color: '#ff8844' },
     ]);
     const routed = routeTracksForPlayback(named);
-    expect(routed).toContain('lead$: note("c4").orbit(1)');
+    expect(routed).toContain('lead$: note("c4").color("cyan").orbit(1)');
     expect(routed.match(/\.orbit\(7\)/g)).toHaveLength(1);
   });
 });

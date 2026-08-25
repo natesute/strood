@@ -1,5 +1,6 @@
 const CDN = 'https://strudel.b-cdn.net';
 const loaded = new Map();
+const LOCAL_AUDIO_URL = /["'](\/audio\/[^"']+\.(?:mp3|wav|ogg|flac|m4a))["']/gi;
 
 export function requiredSamplePacks(code) {
   const packs = [];
@@ -10,6 +11,10 @@ export function requiredSamplePacks(code) {
     && !/\.sound\s*\(\s*["'](?:sine|square|sawtooth|triangle|white|pink|brown|z_sawtooth|supersaw|vox|acid|lush|glitch|init)["']/.test(code);
   if (usesUnbankedSamples) packs.push('dirt');
   return [...new Set(packs)];
+}
+
+export function requiredLocalSampleUrls(code) {
+  return [...new Set([...code.matchAll(LOCAL_AUDIO_URL)].map((match) => match[1]))];
 }
 
 function loadPack(name, samples) {
@@ -23,9 +28,16 @@ function loadPack(name, samples) {
   return promise;
 }
 
-export async function loadSamplePacks(code, samples) {
+export async function loadSamplePacks(code, samples, preloadSample = null) {
   const names = requiredSamplePacks(code);
-  const results = await Promise.allSettled(names.map((name) => loadPack(name, samples)));
-  return { names, results, failed: results.filter((result) => result.status === 'rejected').length };
+  const localUrls = requiredLocalSampleUrls(code);
+  const tasks = names.map((name) => loadPack(name, samples));
+  if (preloadSample) tasks.push(...localUrls.map((url) => preloadSample(url)));
+  const results = await Promise.allSettled(tasks);
+  return {
+    names,
+    localUrls,
+    results,
+    failed: results.filter((result) => result.status === 'rejected').length,
+  };
 }
-

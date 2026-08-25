@@ -1,5 +1,6 @@
-import { StateField } from '@codemirror/state';
+import { Prec, StateField } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType } from '@codemirror/view';
+import { parseSections } from './song-metadata.js';
 import { parseTracks } from './tracks.js';
 
 const NUMBER = '-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)';
@@ -35,6 +36,43 @@ const COLOR_CHOICES = [
   'white', 'red', 'orange', 'yellow', 'lime', 'green', 'cyan',
   'dodgerblue', 'blue', 'magenta', 'purple', 'pink',
 ];
+
+const METHOD_HELP = {
+  sound: 'Choose the instrument or sample source.',
+  gain: 'Set this pattern’s level.',
+  velocity: 'Set how strongly each note is played.',
+  pan: 'Place the sound between the left and right channels.',
+  lpf: 'Remove frequencies above this cutoff.',
+  hpf: 'Remove frequencies below this cutoff.',
+  lpq: 'Set the low-pass filter resonance.',
+  room: 'Add room reverb.',
+  size: 'Set the size of the virtual room.',
+  delay: 'Add a repeating echo.',
+  release: 'Set how long the sound fades after each trigger.',
+  attack: 'Set how quickly the sound reaches full level.',
+  clip: 'Apply soft clipping for density and bite.',
+  shape: 'Add waveshaping distortion.',
+  postgain: 'Set the level after distortion.',
+  orbit: 'Route the track through its own audio channel.',
+  color: 'Set the colour used by linked visualisers.',
+  bank: 'Choose the sample bank.',
+  struct: 'Apply a rhythm of hits and rests.',
+  slow: 'Stretch the pattern in time.',
+  fast: 'Compress the pattern in time.',
+  vib: 'Add vibrato to the pitch.',
+  superimpose: 'Layer a transformed copy over the original pattern.',
+  add: 'Shift notes or values by this amount.',
+  range: 'Map a control pattern between two values.',
+  _scope: 'Draw this track’s waveform on the following line.',
+  _spiral: 'Draw this track’s events around a spiral.',
+  _lissajous: 'Draw the interval relationship as a Lissajous curve.',
+  _orbit: 'Draw this rhythm around a circular beat map.',
+  _phase: 'Trace the real audio signal against a delayed copy of itself.',
+  _interference: 'Sum ripples from each sounding note into one wave field.',
+  _overtones: 'Show each note’s overtone series and where they align or beat.',
+  _pendulum: 'Swing pendulums that realign with the bar, pumped by onsets.',
+  _resonance: 'Let orbiting notes draw the geometry of their frequency ratio.',
+};
 
 function addNumberControl(controls, match, name, value, relativeOffset, config) {
   const from = match.index + relativeOffset;
@@ -107,6 +145,22 @@ export function findInlineControls(code) {
     });
   }
 
+  const songPart = /\bconst\s+songPart\s*=\s*(["'])(.*?)\1/g;
+  const sectionNames = parseSections(code).map(({ name }) => name);
+  for (const match of code.matchAll(songPart)) {
+    const quoted = `${match[1]}${match[2]}${match[1]}`;
+    const from = match.index + match[0].indexOf(quoted);
+    controls.push({
+      type: 'choice',
+      name: 'songPart',
+      value: match[2],
+      quote: match[1],
+      from,
+      to: from + quoted.length,
+      options: ['Full song', ...sectionNames],
+    });
+  }
+
   const booleans = /\b(mute|enabled|bypass)\s*:\s*(true|false)\b/g;
   for (const match of code.matchAll(booleans)) {
     const from = match.index + match[0].lastIndexOf(match[2]);
@@ -114,6 +168,48 @@ export function findInlineControls(code) {
   }
 
   return controls.sort((a, b) => a.from - b.from || a.to - b.to);
+}
+
+export function findMethodHelp(code) {
+  const methods = [];
+  const calls = /\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+  for (const match of code.matchAll(calls)) {
+    const description = METHOD_HELP[match[1]];
+    if (!description) continue;
+    const from = match.index + 1;
+    methods.push({ name: match[1], description, from, to: from + match[1].length });
+  }
+  return methods;
+}
+
+function compactNumber(value) {
+  return Number(Number(value).toFixed(2)).toString();
+}
+
+export function formatContextualValue(name, value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  if (name === 'lpf' || name === 'hpf') return `${Math.round(number)} Hz`;
+  if (name === 'pan') {
+    if (Math.abs(number - 0.5) < 0.005) return 'centre';
+    const direction = number < 0.5 ? 'left' : 'right';
+    return `${Math.round(Math.abs(number - 0.5) * 200)}% ${direction}`;
+  }
+  if (name === 'master') return `${Math.round(number * 100)}% master`;
+  if (name === 'room') return `${Math.round(number * 100)}% room`;
+  if (name === 'clip') return `${Math.round(number * 100)}% clip`;
+  if (name === 'shape') return `${Math.round(number * 100)}% shape`;
+  if (name === 'release' || name === 'attack') {
+    return number < 1 ? `${Math.round(number * 1000)} ms` : `${compactNumber(number)} s`;
+  }
+  if (name === 'gain' || name === 'velocity' || name === 'postgain') {
+    return `${compactNumber(number)}× level`;
+  }
+  if (name === 'size') return `room size ${compactNumber(number)}`;
+  if (name === 'lpq') return `Q ${compactNumber(number)}`;
+  if (name === 'orbit') return `orbit ${Math.round(number)}`;
+  if (name === 'cycles') return `${Math.round(number)} cycle${Math.round(number) === 1 ? '' : 's'}`;
+  return compactNumber(number);
 }
 
 function uniqueOptions(current, options) {
@@ -126,6 +222,22 @@ function announceCommit(view) {
 
 function readableName(name) {
   return name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[-_]+/g, ' ').toLowerCase();
+}
+
+let activeChoiceStrip = null;
+
+function closeChoiceStrip({ restoreFocus = false } = {}) {
+  if (!activeChoiceStrip) return;
+  const { strip, button, onDocumentPointer, onDocumentKey } = activeChoiceStrip;
+  document.removeEventListener('pointerdown', onDocumentPointer, true);
+  document.removeEventListener('keydown', onDocumentKey, true);
+  strip.remove();
+  activeChoiceStrip = null;
+  if (restoreFocus && button.isConnected) button.focus();
+}
+
+function soundChoice(name) {
+  return name === 'sound' || /(?:Synth|Sound)$/.test(name);
 }
 
 class ChoiceWidget extends WidgetType {
@@ -141,28 +253,98 @@ class ChoiceWidget extends WidgetType {
   }
 
   toDOM(view) {
-    const select = document.createElement('select');
-    select.className = 'cm-inline-choice';
-    select.dataset.smartName = this.name;
-    select.style.setProperty('--choice-width', `${Math.max(6, this.value.length + 4)}ch`);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cm-inline-choice';
+    button.dataset.smartName = this.name;
+    button.dataset.smartValue = this.value;
+    button.style.setProperty('--choice-width', `${Math.max(6, this.value.length + 4)}ch`);
     const label = this.name === 'solo' ? 'Solo track' : `Choose ${readableName(this.name)}`;
-    select.setAttribute('aria-label', label);
-    select.title = label;
-    for (const option of uniqueOptions(this.value, this.options)) {
-      const element = document.createElement('option');
-      element.value = option;
-      element.textContent = `${this.quote}${option}${this.quote}`;
-      element.selected = option === this.value;
-      select.appendChild(element);
-    }
-    select.addEventListener('change', () => {
+    button.setAttribute('aria-label', `${label}, current ${this.value}`);
+    button.setAttribute('aria-haspopup', 'listbox');
+    button.title = `${label}; use arrows or scroll to cycle`;
+    button.textContent = `${this.quote}${this.value}${this.quote}`;
+    const options = uniqueOptions(this.value, this.options);
+
+    const commit = (value) => {
+      closeChoiceStrip();
       view.dispatch({
-        changes: { from: this.from, to: this.to, insert: `${this.quote}${select.value}${this.quote}` },
+        changes: { from: this.from, to: this.to, insert: `${this.quote}${value}${this.quote}` },
       });
       announceCommit(view);
       view.focus();
+    };
+
+    const step = (direction) => {
+      const index = options.indexOf(this.value);
+      commit(options[(index + direction + options.length) % options.length]);
+    };
+
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeChoiceStrip();
+
+      const strip = document.createElement('div');
+      strip.className = 'cm-choice-strip';
+      strip.setAttribute('role', 'listbox');
+      strip.setAttribute('aria-label', label);
+      for (const option of options) {
+        const optionButton = document.createElement('button');
+        optionButton.type = 'button';
+        optionButton.className = 'cm-choice-option';
+        optionButton.setAttribute('role', 'option');
+        optionButton.setAttribute('aria-selected', String(option === this.value));
+        optionButton.textContent = option;
+        optionButton.addEventListener('click', () => commit(option));
+        strip.appendChild(optionButton);
+      }
+      document.body.appendChild(strip);
+      const rect = button.getBoundingClientRect();
+      const stripRect = strip.getBoundingClientRect();
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - stripRect.width - 8));
+      const top = rect.top > stripRect.height + 12
+        ? rect.top - stripRect.height - 6
+        : rect.bottom + 6;
+      strip.style.left = `${left}px`;
+      strip.style.top = `${top}px`;
+
+      const onDocumentPointer = (pointerEvent) => {
+        if (!strip.contains(pointerEvent.target) && pointerEvent.target !== button) closeChoiceStrip();
+      };
+      const onDocumentKey = (keyEvent) => {
+        if (keyEvent.key === 'Escape') {
+          keyEvent.preventDefault();
+          closeChoiceStrip({ restoreFocus: true });
+        }
+      };
+      activeChoiceStrip = { strip, button, onDocumentPointer, onDocumentKey };
+      document.addEventListener('pointerdown', onDocumentPointer, true);
+      document.addEventListener('keydown', onDocumentKey, true);
+      strip.querySelector('[aria-selected="true"]')?.focus();
     });
-    return select;
+
+    button.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      event.stopPropagation();
+      step(event.key === 'ArrowRight' ? 1 : -1);
+    });
+    button.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      step(event.deltaY > 0 ? 1 : -1);
+    }, { passive: false });
+
+    if (soundChoice(this.name)) {
+      button.addEventListener('pointerenter', () => {
+        document.dispatchEvent(new CustomEvent('strood:source-sound-focus', { detail: { sound: this.value } }));
+      });
+      button.addEventListener('pointerleave', () => {
+        document.dispatchEvent(new CustomEvent('strood:source-sound-focus', { detail: { sound: null } }));
+      });
+    }
+    return button;
   }
 
   ignoreEvent() { return true; }
@@ -192,7 +374,14 @@ function buildDecorations(state) {
     return Decoration.mark({
       class: 'cm-smart-number',
       attributes: {
-        title: `Drag to adjust ${control.name}; click to edit`,
+        title: `${formatContextualValue(control.name, control.value)}; drag to adjust or click to edit`,
+        role: 'spinbutton',
+        tabindex: '0',
+        'aria-label': `Adjust ${readableName(control.name)}`,
+        'aria-valuemin': String(control.min),
+        'aria-valuemax': String(control.max),
+        'aria-valuenow': String(control.value),
+        'aria-valuetext': formatContextualValue(control.name, control.value),
         'data-smart-name': control.name,
         'data-smart-from': String(control.from),
         'data-smart-to': String(control.to),
@@ -203,6 +392,15 @@ function buildDecorations(state) {
       },
     }).range(control.from, control.to);
   });
+  for (const method of findMethodHelp(state.doc.toString())) {
+    ranges.push(Decoration.mark({
+      class: 'cm-method-help',
+      attributes: {
+        title: method.description,
+        'data-method-help': method.name,
+      },
+    }).range(method.from, method.to));
+  }
   return Decoration.set(ranges, true);
 }
 
@@ -244,6 +442,24 @@ const numberScrubbing = EditorView.domEventHandlers({
     const startX = event.clientX;
     let moved = false;
     let current = original;
+    const hud = document.createElement('div');
+    hud.className = 'cm-number-hud';
+    hud.setAttribute('aria-hidden', 'true');
+    hud.innerHTML = '<span class="cm-number-hud-name"></span><span class="cm-number-hud-value"></span><i><b></b></i><small>shift · fine</small>';
+    const controlName = target.dataset.smartName || 'value';
+    hud.querySelector('.cm-number-hud-name').textContent = readableName(controlName);
+    document.body.appendChild(hud);
+    const targetRect = target.getBoundingClientRect();
+    hud.style.left = `${Math.max(8, Math.min(targetRect.left, window.innerWidth - 210))}px`;
+    hud.style.top = `${Math.max(8, targetRect.top - 48)}px`;
+
+    const updateHud = (value, fine = false) => {
+      const percent = max === min ? 0 : ((value - min) / (max - min)) * 100;
+      hud.querySelector('.cm-number-hud-value').textContent = formatContextualValue(controlName, value);
+      hud.querySelector('b').style.transform = `scaleX(${Math.max(0, Math.min(1, percent / 100))})`;
+      hud.classList.toggle('is-fine', fine);
+    };
+    updateHud(initial);
 
     const apply = (moveEvent) => {
       const distance = moveEvent.clientX - startX;
@@ -253,6 +469,7 @@ const numberScrubbing = EditorView.domEventHandlers({
       const raw = Math.max(min, Math.min(max, initial + distance * drag * fine));
       const stepped = Math.round(raw / step) * step;
       const next = formatInlineNumber(stepped, step, original);
+      updateHud(stepped, moveEvent.shiftKey);
       if (next === current) return;
       view.dispatch({ changes: { from, to, insert: next } });
       to = from + next.length;
@@ -263,6 +480,8 @@ const numberScrubbing = EditorView.domEventHandlers({
       window.removeEventListener('pointermove', apply);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
+      hud.classList.add('is-done');
+      window.setTimeout(() => hud.remove(), 140);
       if (upEvent.type === 'pointerup') apply(upEvent);
       if (!moved) view.dispatch({ selection: { anchor: from, head: to } });
       if (moved) announceCommit(view);
@@ -273,6 +492,39 @@ const numberScrubbing = EditorView.domEventHandlers({
     window.addEventListener('pointermove', apply);
     window.addEventListener('pointerup', finish);
     window.addEventListener('pointercancel', finish);
+    return true;
+  },
+});
+
+const numberKeyboardStepping = EditorView.domEventHandlers({
+  keydown(event, view) {
+    if (!(event.target instanceof Element)) return false;
+    const target = event.target.closest('.cm-smart-number');
+    const selection = view.state.selection.main;
+    const selectedControl = !target && findInlineControls(view.state.doc.toString()).find((control) =>
+      control.type === 'number' && selection.from >= control.from && selection.to <= control.to);
+    if ((!target || !view.dom.contains(target)) && !selectedControl) return false;
+    const direction = ['ArrowRight', 'ArrowUp'].includes(event.key) ? 1
+      : (['ArrowLeft', 'ArrowDown'].includes(event.key) ? -1 : 0);
+    if (!direction) return false;
+
+    const from = selectedControl?.from ?? Number(target.dataset.smartFrom);
+    const to = selectedControl?.to ?? Number(target.dataset.smartTo);
+    const min = selectedControl?.min ?? Number(target.dataset.smartMin);
+    const max = selectedControl?.max ?? Number(target.dataset.smartMax);
+    const baseStep = selectedControl?.step ?? Number(target.dataset.smartStep);
+    const original = view.state.doc.sliceString(from, to);
+    const multiplier = event.altKey ? 10 : (event.shiftKey ? 0.2 : 1);
+    const step = baseStep * multiplier;
+    const raw = Math.max(min, Math.min(max, Number(original) + direction * step));
+    const next = formatInlineNumber(raw, step, original);
+    event.preventDefault();
+    event.stopPropagation();
+    view.dispatch({
+      changes: { from, to, insert: next },
+      selection: { anchor: from, head: from + next.length },
+    });
+    announceCommit(view);
     return true;
   },
 });
@@ -296,4 +548,9 @@ const booleanToggling = EditorView.domEventHandlers({
   },
 });
 
-export const inlineControlExtensions = [smartControlField, numberScrubbing, booleanToggling];
+export const inlineControlExtensions = [
+  smartControlField,
+  numberScrubbing,
+  Prec.highest(numberKeyboardStepping),
+  booleanToggling,
+];

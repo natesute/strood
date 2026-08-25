@@ -4,7 +4,7 @@ import { registerPatch, listModules, getModuleFactory } from './synth-modules/in
 import { listPatchMacros, insertPatchMacro } from './synth-modules/macros.mjs';
 import { superdough, getAudioContext } from 'superdough';
 import { listPatches, readPatch, writePatch } from './src/api.js';
-import { showToast, trapFocus } from './src/ui.js';
+import { showToast } from './src/ui.js';
 import { confirmDialog, promptDialog } from './src/dialogs.js';
 
 let overlayEl = null;
@@ -25,6 +25,12 @@ let graphScale = 1;
 let dragWire = null; // { fromId, fromType, svgPath }
 
 const modColors = ['#56d4dd', '#c678dd', '#7ee787', '#e6b450', '#ff5370'];
+const patchSoundAliases = {
+  'acid-bass': 'acid',
+  'glitch-pluck': 'glitch',
+  'lush-pad': 'lush',
+  'vox-pad': 'vox',
+};
 
 // ── Helpers ──────────────────────────────────────────────
 function getModuleMeta(type) {
@@ -32,6 +38,14 @@ function getModuleMeta(type) {
 }
 function getParamMeta(type, paramName) {
   return getModuleMeta(type)?.params?.[paramName] || {};
+}
+function currentPatchSound() {
+  return patchSoundAliases[currentPatchName] || currentPatchName;
+}
+function announcePatchFocus(active) {
+  document.dispatchEvent(new CustomEvent('strood:patch-sound-focus', {
+    detail: { sound: active ? currentPatchSound() : null },
+  }));
 }
 function fmt(v) {
   if (v == null) return '—';
@@ -456,6 +470,8 @@ function createNode(id) {
   node.tabIndex = 0;
   node.setAttribute('role', 'group');
   node.setAttribute('aria-label', `${def.type} module ${id}`);
+  node.addEventListener('pointerenter', () => announcePatchFocus(true));
+  node.addEventListener('pointerleave', () => announcePatchFocus(false));
 
   // Header (drag handle)
   const header = document.createElement('div');
@@ -952,9 +968,8 @@ function buildOverlay() {
   const overlay = document.createElement('div');
   overlay.id = 'patch-editor';
   overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-modal', 'false');
   overlay.setAttribute('aria-label', 'Patch studio');
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closePatchEditor(); });
 
   const panel = document.createElement('div');
   panel.className = 'pe-panel';
@@ -1068,7 +1083,6 @@ function buildOverlay() {
       e.shiftKey ? redoPatch() : undoPatch();
       return;
     }
-    trapFocus(overlay, e);
     if (e.target.closest('input, select, button, [contenteditable="true"]')) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (selectedModuleId && patchDef.modules[selectedModuleId]) {
@@ -1115,6 +1129,7 @@ async function loadPatch(name) {
     const data = await readPatch(name);
     patchDef = data;
     currentPatchName = name;
+    announcePatchFocus(false);
     selectedModuleId = null;
     // Register under filename so the keyboard can play it
     registerPatch(name, patchDef);
@@ -1238,6 +1253,7 @@ export async function showPatchEditor() {
 
 export async function closePatchEditor() {
   if (overlayEl) {
+    announcePatchFocus(false);
     if (patchDirty) {
       if (!(await confirmDialog({
         title: 'Discard patch changes?',
@@ -1267,3 +1283,11 @@ export async function togglePatchEditor() {
   if (overlayEl) return closePatchEditor();
   return showPatchEditor();
 }
+
+document.addEventListener('strood:source-sound-focus', (event) => {
+  if (!overlayEl) return;
+  const sound = event.detail?.sound || null;
+  const linked = Boolean(sound && sound === currentPatchSound());
+  overlayEl.classList.toggle('pe-source-linked', linked);
+  overlayEl.querySelectorAll('.pe-node').forEach((node) => node.classList.toggle('source-linked', linked));
+});

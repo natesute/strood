@@ -1,10 +1,10 @@
 setcpm(95/4)
 
-// Live controls: drag underlined numbers; click quoted choices or mute values.
-const master = .9
+// Performance mix
+const master = .25
 const solo = 'all'
-const vocalSynth = 'sine'
-const vocalMix = { gain: 1.08, pan: .5, mute: false }
+const vocalSynth = 'square'
+const vocalMix = { gain: 1.5, pan: .5, mute: false }
 const bassMix = { gain: 1, pan: .5, mute: false }
 const organMix = { gain: .82, pan: null, mute: false }
 const stabsMix = { gain: .85, pan: .42, mute: false }
@@ -12,90 +12,199 @@ const runsMix = { gain: .75, pan: .58, mute: false }
 const kickMix = { gain: 1.05, pan: .5, mute: false }
 const snareMix = { gain: .92, pan: .5, mute: false }
 const hatsMix = { gain: .8, pan: .56, mute: false }
-const mix = (name, pattern, { gain = 1, pan = null, mute = false } = {}) => {
+const track = (
+  name,
+  pattern,
+  { gain = 1, pan = null, mute = false } = {}
+) => {
   const level = master * gain * (!mute && (solo === 'all' || solo === name) ? 1 : 0)
   const balanced = pattern.gain(level)
   return pan === null ? balanced : balanced.pan(pan)
 }
 
-const vocalPhrase = note("<[~ ~ ~ a4 e5 d5 d5 d5 ~ e5 ~ ~ a5@4] [e5 ~ e5 ~ e5 ~ g5@3 f5 e5 ~ ~ ~ ~ ~] [d5 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~] [a4 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~]>")
-  .sound(vocalSynth).gain(.62).release(.8).lpf(2400).room(.32).size(3).delay(".22:.15:.28")
+// Sparse lead vocal motif
+const vocalNotes = "<[~ ~ ~ a4 e5 d5 d5 d5 ~ e5 ~ ~ a5@4] [e5 ~ e5 ~ e5 ~ g5@3 f5 e5 ~ ~ ~ ~ ~] [d5 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~] [a4 ~ e5 ~ d5 ~ e5 ~ d5 ~ e5 d5 ~ e5 a4 ~]>"
+const leadVocal = note(vocalNotes)
+  .sound(vocalSynth)
+  .gain(1.38)
+  .release(.28)
+  .lpf(4280)
+  .room(.28)
+  .size(4.6)
+  .delay(".22:.15:.28")
 
-const bassPhrase = stack(
-  note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a2 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
-    .sound("sine").gain(.2).lpf(150).clip(.82).release(.1),
-  note("<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a1 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>")
-    .sound("square").gain(.15).lpf(sine.range(180,350).slow(8)).lpq(4).clip(.5).release(.1).shape(.65).postgain(.3)
+// Layered bass with a filtered lower voice
+const bassNotes = "<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a2 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g2 ~]>"
+const bassUndertoneNotes = "<[f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f1 f2 ~ ~ ~ ~] [f2 ~ ~ ~ ~ ~ f2 ~ ~ ~ f2 g2 ~ ~ g2 ~] [a2 ~ ~ ~ ~ ~ a2 ~ ~ ~ a1 a2 ~ ~ a1 ~] [g2 ~ ~ ~ ~ ~ g2 ~ ~ ~ g1 g2 ~ ~ g1 ~]>"
+const bassLine = stack(
+  note(bassNotes)
+    .sound("square")
+    .gain(1.5)
+    .lpf(1520)
+    .clip(.77)
+    .release(.33),
+  note(bassUndertoneNotes)
+    .sound("square")
+    .gain(1.5)
+    .lpf(sine.range(180, 350).slow(8))
+    .lpq(4)
+    .clip(.5)
+    .release(.1)
+    .shape(.65)
+    .postgain(.45)
 )
 
-const organPhrase = stack(
-  note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
-    .sound("sawtooth").release(.16).gain(.22).lpf(perlin.range(900,1120)).lpq(2).vib("5:.1").room(.38).size(4).pan(.38)
+// Detuned organ triads
+const organVoicings = "<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>"
+const organChords = stack(
+  note(organVoicings)
+    .sound("sawtooth")
+    .release(.16)
+    .gain(.22)
+    .lpf(perlin.range(900, 1120))
+    .lpq(2)
+    .vib("5:.1")
+    .room(.38)
+    .size(4)
+    .pan(.38)
     .superimpose(x => x.add(note(.08))),
-  note("<[f4,a4,c5] [[f4,a4,c5]@5 [g4,b4,d5]@3] [a4,c5,e5] [g4,b4,d5]>")
-    .sound("sawtooth").release(.18).gain(.18).lpf(perlin.range(1050,1260).slow(4)).lpq(2).vib("4.5:.08").shape(.12).postgain(.5).room(.55).size(5).pan(.62)
+  note(organVoicings)
+    .sound("sawtooth")
+    .release(.18)
+    .gain(.18)
+    .lpf(perlin.range(1050, 1260).slow(4))
+    .lpq(2)
+    .vib("4.5:.08")
+    .shape(.12)
+    .postgain(.5)
+    .room(.55)
+    .size(5)
+    .pan(.62)
     .superimpose(x => x.add(note(-.12)).delay(".3:.12:.5"))
 )
 
-const stabsPhrase = stack(
-  note("<[[f4,a4,c5] ~@15] ~ [[a4,c5,e5] ~ ~ ~ [a4,c5,e5] ~ ~ [a4,c5,e5] [a4,c5,e5] ~@7] [[g4,b4,d5] ~ ~ ~ [g4,b4,d5] ~ ~ [g4,b4,d5] [g4,b4,d5] ~@7]>").gain(.48),
-  note("<[[f5,a5,c6] ~@15] ~ [[a5,c6,e6] ~ ~ ~ [a5,c6,e6] ~ ~ [a5,c6,e6] [a5,c6,e6] ~@7] [[g5,b5,d6] ~ ~ ~ [g5,b5,d6] ~ ~ [g5,b5,d6] [g5,b5,d6] ~@7]>").gain(.3)
-).sound("piano").hpf(180).clip(.55).release(.65).room(.32).size(5)
+// Syncopated piano responses
+const pianoStabChords = "<[[f4,a4,c5] ~@15] ~ [[a4,c5,e5] ~ ~ ~ [a4,c5,e5] ~ ~ [a4,c5,e5] [a4,c5,e5] ~@7] [[g4,b4,d5] ~ ~ ~ [g4,b4,d5] ~ ~ [g4,b4,d5] [g4,b4,d5] ~@7]>"
+const pianoStabOctaves = "<[[f5,a5,c6] ~@15] ~ [[a5,c6,e6] ~ ~ ~ [a5,c6,e6] ~ ~ [a5,c6,e6] [a5,c6,e6] ~@7] [[g5,b5,d6] ~ ~ ~ [g5,b5,d6] ~ ~ [g5,b5,d6] [g5,b5,d6] ~@7]>"
+const pianoStabs = stack(
+  note(pianoStabChords).gain(.48),
+  note(pianoStabOctaves).gain(.3)
+)
+  .sound("piano")
+  .hpf(180)
+  .clip(.55)
+  .release(.65)
+  .room(.32)
+  .size(5)
 
-const runsPhrase = stack(
-  note("<[d5 ~@11] ~ ~ [~@6 c6 b5 a5 g5 f5 e5]>").gain(.55),
-  note("<[d6 ~@11] ~ ~ [~@6 c7 b6 a6 g6 f6 e6]>").gain(.32)
-).sound("piano").clip(.5).release(.35).delay(".2:.15:.35").room(.28).size(4)
+const pianoRunNotes = "<[d5 ~@11] ~ ~ [~@6 c6 b5 a5 g5 f5 e5]>"
+const pianoRunOctaves = "<[d6 ~@11] ~ ~ [~@6 c7 b6 a6 g6 f6 e6]>"
+const pianoRun = stack(
+  note(pianoRunNotes).gain(.55),
+  note(pianoRunOctaves).gain(.32)
+)
+  .sound("piano")
+  .clip(.5)
+  .release(.35)
+  .delay(".2:.15:.35")
+  .room(.28)
+  .size(4)
 
-const kickPhrase = s("bd").struct("t ~ ~ ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~ ~ ~").bank("RolandTR909").gain(.22).shape(.35).release(.8).room(.06)
-const snarePhrase = s("sd").struct("~ ~ ~ ~ t ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~").bank("RolandTR909").gain(.38).room(.16).size(2)
-const hatsPhrase = s("hh*8").bank("RolandTR909").gain("[.16 .24]*4").clip(sine.range(.04,.06).fast(2)).shape(.08).hpf(5200)
+// Drum pocket
+const kickRhythm = "t ~ ~ ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~ ~ ~"
+const snareRhythm = "~ ~ ~ ~ t ~ ~ ~ ~ ~ ~ ~ t ~ ~ ~"
+const kickPattern = s("bd")
+  .struct(kickRhythm)
+  .bank("RolandTR909")
+  .gain(1.36)
+  .shape(.35)
+  .release(.8)
+  .room(.06)
+const snarePattern = s("sd")
+  .struct(snareRhythm)
+  .bank("RolandTR909")
+  .gain(.38)
+  .room(.16)
+  .size(2)
+const hatsPattern = s("hh*8")
+  .bank("RolandTR909")
+  .gain("[.16 .24]*4")
+  .clip(sine.range(.04, .06).fast(2))
+  .shape(.08)
+  .hpf(5200)
 
-// @track vocal | Vocal
-vocal$: mix('vocal',
-  vocalPhrase.orbit(1).color("#ff8844")
-    ._spiral({ stretch: .5, size: 100, thickness: 24, steady: 0, fade: .001, colorizeInactive: 0 }),
+// Lead vocal
+vocal$: track(
+  'vocal',
+  leadVocal
+    .orbit(1)
+    .color("#ff8844"),
   vocalMix
 )
+  ._spiral({ stretch: .5, size: 100, thickness: 24, steady: 0, fade: .001, colorizeInactive: 0 })
 
-// @track bass | Bass
-bass$: mix('bass',
-  bassPhrase.orbit(2).color("dodgerblue")._scope(),
+// Sub bass
+bass$: track(
+  'bass',
+  bassLine
+    .orbit(2)
+    .color("dodgerblue"),
   bassMix
 )
+  ._scope()
 
-// @track organ | Organ
-organ$: mix('organ',
-  organPhrase.orbit(3).color("magenta")._lissajous({ size: 150 }),
+// Wobbling organ chords
+organ$: track(
+  'organ',
+  organChords
+    .orbit(3)
+    .color("white"),
   organMix
 )
+  ._lissajous({ size: 150 })
 
-// @track stabs | Piano stabs
-stabs$: mix('stabs',
-  stabsPhrase.orbit(4).color("cyan"),
+// Syncopated piano stabs
+stabs$: track(
+  'stabs',
+  pianoStabs
+    .orbit(4)
+    .color("red"),
   stabsMix
 )
 
-// @track runs | Piano runs
-runs$: mix('runs',
-  runsPhrase.orbit(5).color("white"),
+// Descending piano answer
+runs$: track(
+  'runs',
+  pianoRun
+    .orbit(5)
+    .color("white"),
   runsMix
 )
 
-// @track kick | Kick
-kick$: mix('kick',
-  kickPhrase.orbit(6).color("red")._orbit({ size: 130 }),
+// Anchored kick
+kick$: track(
+  'kick',
+  kickPattern
+    .orbit(6)
+    .color("red"),
   kickMix
 )
 
-// @track snare | Snare
-snare$: mix('snare',
-  snarePhrase.orbit(7).color("yellow"),
+// Backbeat snare
+snare$: track(
+  'snare',
+  snarePattern
+    .orbit(7)
+    .color("yellow"),
   snareMix
 )
 
-// @track hats | Hats
-hats$: mix('hats',
-  hatsPhrase.orbit(8).color("lime"),
+// Driving eighth-note hats
+hats$: track(
+  'hats',
+  hatsPattern
+    .orbit(8)
+    .color("lime"),
   hatsMix
 )
+  ._orbit({ size: 130 })

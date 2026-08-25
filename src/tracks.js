@@ -1,8 +1,17 @@
 const TRACK_START = /^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\$|\$):/;
 const TRACK_DIRECTIVE = /^\/\/\s*@track\s+([A-Za-z0-9_-]+)(?:\s*\|\s*(.+))?$/i;
+const TRACK_COLORS = ['#ff8844', '#58a6ff', '#d985ff', '#63d7da', '#d9dde5', '#ff6b78', '#ffd166', '#8be36b'];
 
 function slug(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'track';
+}
+
+function safeTrackColor(value, fallback) {
+  const color = value?.trim();
+  if (!color) return fallback;
+  if (/^#[0-9a-f]{3,8}$/i.test(color)) return color;
+  if (/^[a-z]+$/i.test(color)) return color.toLowerCase();
+  return fallback;
 }
 
 export function parseTracks(code) {
@@ -44,6 +53,7 @@ export function parseTracks(code) {
     const sourceLabel = lines[lineIndex].match(TRACK_START)?.[1];
     const name = label || sourceLabel || `Track ${index + 1}`;
     const orbitMatch = block.match(/\.orbit\(\s*(\d+)\s*\)/);
+    const colorMatch = block.match(/\.color\(\s*(["'])([^"']+)\1\s*\)/);
     return {
       id: `${index}-${lineIndex}`,
       key: explicitKey || slug(sourceLabel || name),
@@ -53,6 +63,7 @@ export function parseTracks(code) {
       start: offsets[lineIndex],
       end: endLine < lines.length ? offsets[endLine] : code.length,
       orbit: orbitMatch ? Number(orbitMatch[1]) : index + 1,
+      color: safeTrackColor(colorMatch?.[2], TRACK_COLORS[index % TRACK_COLORS.length]),
     };
   });
 }

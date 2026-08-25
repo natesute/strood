@@ -3,6 +3,7 @@ import {
   getAudioContext,
   webaudioOutput,
   initAudio,
+  loadBuffer,
   registerSynthSounds,
   samples,
 } from '@strudel/webaudio';
@@ -25,12 +26,33 @@ import {
 } from './src/api.js';
 import { saveRecoverySnapshot, listRecoverySnapshots, clearRecoverySnapshots } from './src/recovery.js';
 import { parseTracks, routeTracksForPlayback } from './src/tracks.js';
-import { ensureMasterEngine, readMasterMeter } from './src/audio-engine.js';
+import {
+  ensureMasterEngine,
+  readMasterMeter,
+  setOrbitAudibility,
+  silenceMasterEngine,
+} from './src/audio-engine.js';
 import { inlineControlExtensions } from './src/inline-controls.js';
-import { parseSections, sectionAtCycle, nextCycleTiming } from './src/song-metadata.js';
+import {
+  clearAppliedLines,
+  flashAppliedLines,
+  scoreVisualExtensions,
+  setPatchSoundLink,
+} from './src/score-visuals.js';
+import {
+  cycleWithinSection,
+  nextCycleTiming,
+  parseSections,
+  sectionEndTiming,
+  sectionAtCycle,
+  setSelectedSongSection,
+  selectedSongSection,
+} from './src/song-metadata.js';
 import { loadSamplePacks } from './src/sample-loader.js';
 import { choiceDialog, confirmDialog, promptDialog } from './src/dialogs.js';
-import { createVisualizerModeController } from './src/visualizer-modes.js';
+import { createInlineVisualizerController } from './src/visualizer-modes.js';
+import { createGraphViewController } from './src/graph-view.js';
+import { buildSongGraph, collectGraphActivityHaps } from './src/graph-model.js';
 import { openPatchEditor, prepareOptionalSystems } from './src/optional-systems.js';
 import { describeError, inferErrorLine, showToast, trapFocus } from './src/ui.js';
 import initialSongCode from './songs/ms jackson.strudel?raw';
@@ -38,7 +60,10 @@ import initialSongCode from './songs/ms jackson.strudel?raw';
 const editorsContainer = document.getElementById('editors-container');
 const secondaryEditors = [];
 let lastEvalCode = ''; // last evaluated combined code, for location analysis
+let lastEvaluatedSongName = null;
+let songCueTimeline = 0;
 let syncingEditors = false;
+let graphController = null;
 
 /* ── Live file sync ─────────────────────────────────────── */
 let currentSongName = null;
@@ -47,12 +72,23 @@ let lastSavedCode = '';
 let documentDirty = false;
 let pendingExternalUpdate = null;
 let recoveryTimer = 0;
-let currentSections = [];
 let queuedUpdateTimer = 0;
 let queuedTargetCycle = null;
+let appliedLineTimer = 0;
 let audioReadyPromise = null;
 let activeAudioContext = null;
 let audioStateListener = null;
+let audioNeedsWake = false;
+let audioWakePromise = null;
+let audioCycleInProgress = false;
+let pauseRequested = false;
+let playbackSourceCycle = 0;
+let playbackSchedulerCycle = 0;
+let queuedSectionName = null;
+let loopedSectionName = null;
+let activeLoopedSectionName = null;
+let pendingCueStartCycle = null;
+let pendingCueSchedulerCycle = null;
 
 function audioIsRunning() {
   return activeAudioContext?.state === 'running';
@@ -66,14 +102,22 @@ function bindAudioContext(context) {
   activeAudioContext = context;
   audioStateListener = () => {
     updateMode();
-    if (isPlaying && !document.hidden && ['suspended', 'interrupted'].includes(context.state)) {
+    if (!audioCycleInProgress && isPlaying && !pauseRequested && !document.hidden
+      && ['suspended', 'interrupted'].includes(context.state)) {
       context.resume().then(updateMode).catch(() => {});
     }
   };
   context.addEventListener('statechange', audioStateListener);
 }
 
-async function ensureAudioReady() {
+function primeAudioOutput(context) {
+  const source = context.createBufferSource();
+  source.buffer = context.createBuffer(1, 1, context.sampleRate);
+  source.connect(context.destination);
+  source.start();
+}
+
+async function ensureAudioReady({ resume = true, cycle = audioNeedsWake } = {}) {
   if (!audioReadyPromise) {
     audioReadyPromise = initAudio().catch((error) => {
       audioReadyPromise = null;
@@ -83,12 +127,42 @@ async function ensureAudioReady() {
   await audioReadyPromise;
   const context = getAudioContext();
   bindAudioContext(context);
-  if (context.state !== 'running') await context.resume();
-  if (context.state !== 'running') {
-    throw new Error(`Audio could not resume (${context.state}). Click Resume to try again.`);
+  if (resume && cycle && context.state === 'running') {
+    audioCycleInProgress = true;
+    try {
+      await context.suspend();
+      await context.resume();
+    } finally {
+      audioCycleInProgress = false;
+    }
+  } else if (resume && context.state !== 'running') {
+    await context.resume();
   }
+  if (resume) primeAudioOutput(context);
+  if (resume && context.state !== 'running') {
+    throw new Error(`Audio could not resume (${context.state}). Click Play to try again.`);
+  }
+  if (resume) audioNeedsWake = false;
   return context;
 }
+
+function markAudioOutputForWake() {
+  audioNeedsWake = true;
+}
+
+function wakeAudioAfterFocus() {
+  if (!audioNeedsWake || !isPlaying || pauseRequested) return;
+  if (!audioWakePromise) {
+    audioWakePromise = ensureAudioReady({ cycle: true })
+      .then(updateMode)
+      .catch(() => updateMode())
+      .finally(() => { audioWakePromise = null; });
+  }
+}
+
+window.addEventListener('blur', markAudioOutputForWake);
+window.addEventListener('focus', wakeAudioAfterFocus);
+navigator.mediaDevices?.addEventListener?.('devicechange', markAudioOutputForWake);
 
 let _saveTimer = 0;
 function debouncedSave() {
@@ -123,6 +197,13 @@ const onsetTimestamps = new Map(); // uid -> performance.now() when onset detect
 const currentHapIds = new Set();
 const currentRippleIds = new Set();
 const ONSET_FLASH_MS = 50;
+let playbackScrollGuardUntil = 0;
+
+function bindPlaybackScrollGuard(view) {
+  view.scrollDOM.addEventListener('scroll', () => {
+    playbackScrollGuardUntil = performance.now() + 180;
+  }, { passive: true });
+}
 
 /* ── Dirty-line tracking ────────────────────────────────── */
 const clearDirtyLines = StateEffect.define();
@@ -173,43 +254,92 @@ const errorLineField = StateField.define({
 
 /* ── Statusline ─────────────────────────────────────────── */
 const modeEl = document.getElementById('mode');
-const infoEl = document.getElementById('info');
 const dirtyCountEl = document.getElementById('dirty-count');
 const songNameEl = document.getElementById('song-name');
 const saveStateEl = document.getElementById('save-state');
 const runBtn = document.getElementById('run-btn');
 const stopBtn = document.getElementById('stop-btn');
-const bootStatusEl = document.getElementById('boot-status');
+const updateBtn = document.getElementById('update-btn');
 const diagnosticsEl = document.getElementById('diagnostics');
 const diagnosticMessageEl = document.getElementById('diagnostic-message');
 const masterLevelEl = document.getElementById('master-level');
 const masterPeakEl = document.getElementById('master-peak');
 const limiterStateEl = document.getElementById('limiter-state');
-const cycleStatusEl = document.getElementById('cycle-status');
-const sectionStatusEl = document.getElementById('section-status');
 const queueStatusEl = document.getElementById('queue-status');
 let isPlaying = false;
 let currentCols = 1;
+let performanceMode = false;
+
+function schedulerCycle() {
+  try {
+    const cycle = Number(editor.repl.scheduler.now());
+    return Number.isFinite(cycle) ? cycle : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function graphPerformanceSnapshot() {
+  const source = lastEvalCode || getAllCode();
+  const sections = parseSections(source);
+  const totalCycles = Math.max(0, ...sections.map(({ end }) => end));
+  const selected = selectedSongSection(getAllCode());
+  let cycle = selected?.start || 0;
+  if (isPlaying) {
+    const elapsed = Math.max(0, schedulerCycle() - playbackSchedulerCycle);
+    const loopedSection = sections.find(({ name }) => name === activeLoopedSectionName);
+    cycle = loopedSection
+      ? cycleWithinSection(loopedSection, playbackSourceCycle - loopedSection.start + elapsed)
+      : playbackSourceCycle + elapsed;
+  }
+  if (totalCycles) cycle = ((cycle % totalCycles) + totalCycles) % totalCycles;
+  return {
+    playing: isPlaying,
+    paused: isPlaying && (pauseRequested || !audioIsRunning()),
+    cycle,
+    sections,
+    currentSection: sectionAtCycle(sections, cycle),
+    queuedSection: queuedSectionName,
+    loopedSection: loopedSectionName,
+  };
+}
+
+function syncGraphPerformance() {
+  graphController?.setPerformanceState(graphPerformanceSnapshot());
+}
 
 function updateMode() {
-  const audioPaused = isPlaying && !audioIsRunning();
-  modeEl.textContent = audioPaused ? 'AUDIO PAUSED' : (isPlaying ? 'PLAYING' : 'STOPPED');
+  const audioPaused = isPlaying && (pauseRequested || !audioIsRunning());
+  const playbackDirty = isPlaying && !queuedUpdateTimer && getAllCode() !== lastEvalCode;
+  const showPlay = !isPlaying || audioPaused;
+  modeEl.textContent = audioPaused ? 'PAUSED' : (isPlaying ? 'PLAYING' : 'STOPPED');
   modeEl.className = isPlaying && !audioPaused ? 'playing' : 'stopped';
-  runBtn.classList.toggle('playing', isPlaying && !audioPaused);
-  runBtn.querySelector('span').textContent = audioPaused ? 'Resume' : (isPlaying ? 'Update' : 'Run');
-  if (!isPlaying) clearQueuedUpdate();
+  runBtn.querySelector('.transport-icon-play').toggleAttribute('hidden', !showPlay);
+  runBtn.querySelector('.transport-icon-pause').toggleAttribute('hidden', showPlay);
+  runBtn.setAttribute('aria-label', showPlay ? 'Play' : 'Pause');
+  runBtn.title = showPlay ? 'Play (Ctrl+Enter)' : 'Pause';
+  stopBtn.disabled = !isPlaying;
+  updateBtn.hidden = !isPlaying || !playbackDirty;
+  updateBtn.textContent = 'Update';
+  updateBtn.title = 'Update playing song (Ctrl+Enter)';
+  if (!isPlaying) {
+    clearQueuedUpdate();
+  }
+  syncGraphPerformance();
 }
 
 function setSaveState(label, state = '') {
   saveStateEl.textContent = label;
   saveStateEl.className = `save-state ${state}`.trim();
+  saveStateEl.hidden = !label;
 }
 
 function updateDocumentState() {
   const code = getAllCode();
   documentDirty = code !== lastSavedCode;
   songNameEl.textContent = currentSongName || 'Untitled';
-  setSaveState(documentDirty ? 'Unsaved' : (currentSongName ? 'Saved' : 'Ready'), documentDirty ? 'unsaved' : (currentSongName ? 'saved' : ''));
+  setSaveState(documentDirty ? 'Unsaved' : '', documentDirty ? 'unsaved' : '');
+  updateMode();
   window.onbeforeunload = documentDirty ? () => true : null;
 }
 
@@ -260,7 +390,6 @@ function updateDirtyCount() {
 
 /* ── Prebake ────────────────────────────────────────────── */
 async function prebake() {
-  bootStatusEl.textContent = 'Preparing audio engine…';
   await evalScope(
     evalScope,
     import('@strudel/core'),
@@ -271,14 +400,14 @@ async function prebake() {
   );
   await registerSynthSounds();
   ensureMasterEngine();
-  bootStatusEl.textContent = 'Synths ready · loading required samples…';
   const [, result] = await Promise.all([
     prepareOptionalSystems(getAllCode()),
-    loadSamplePacks(getAllCode(), samples),
+    loadSamplePacks(
+      getAllCode(),
+      samples,
+      (url) => loadBuffer(url, getAudioContext(), 'local audio'),
+    ),
   ]);
-  bootStatusEl.textContent = result.failed
-    ? `Audio ready · ${result.failed} sample pack${result.failed === 1 ? '' : 's'} unavailable`
-    : 'Audio ready';
   if (result.failed) showToast('Some remote samples are unavailable. Built-in synths still work.');
 }
 
@@ -289,18 +418,31 @@ const editor = new StrudelMirror({
   getTime: () => getAudioContext().currentTime,
   transpiler,
   initialCode: localStorage.getItem('strudel_code') ?? initialSongCode,
-  drawTime: [-2, 2],
+  drawTime: [-1, 1],
   prebake,
   onUpdateState: (state) => {
+    const wasPlaying = isPlaying;
     isPlaying = state.started;
+    if (wasPlaying && !isPlaying) silenceMasterEngine();
+    if (!isPlaying) pauseRequested = false;
     updateMode();
   },
   onError: (error) => {
     console.error(error);
     showDiagnostic(error);
-    setSaveState('Run failed', 'failed');
   },
 });
+
+// Strudel's drawer queries the complete pattern window every animation frame.
+// Twenty frames per second keeps the score fluid without competing with audio scheduling.
+const DRAW_FRAME_INTERVAL = 50;
+const drawFrame = editor.drawer.framer.onFrame;
+let lastDrawFrame = -Infinity;
+editor.drawer.framer.onFrame = (time) => {
+  if (document.hidden || time - lastDrawFrame < DRAW_FRAME_INTERVAL) return;
+  lastDrawFrame = time;
+  drawFrame(time);
+};
 
 /* ── Custom theme (max color variety for Strudel code) ── */
 const customThemeColors = EditorView.theme({
@@ -358,16 +500,13 @@ const customHighlight = HighlightStyle.define([
 ]);
 
 let wrapEnabled = true;
-const cursorStatusListener = EditorView.updateListener.of((viewUpdate) => {
-  const position = viewUpdate.state.selection.main.head;
-  const line = viewUpdate.state.doc.lineAt(position);
-  infoEl.textContent = `${line.number}:${position - line.from + 1}`;
-});
 const documentChangeListener = EditorView.updateListener.of((viewUpdate) => {
   if (!viewUpdate.docChanged) return;
   syncDocumentChanges(editor.editor, viewUpdate.transactions);
+  updateDocumentState();
   debouncedSave();
   updateDirtyCount();
+  graphController?.scheduleRefresh();
 });
 
 editor.editor.dispatch({
@@ -377,8 +516,8 @@ editor.editor.dispatch({
       Prec.highest(syntaxHighlighting(customHighlight)),
       dirtyLineField,
       errorLineField,
+      ...scoreVisualExtensions,
       ...inlineControlExtensions,
-      cursorStatusListener,
       documentChangeListener,
     ]),
     compartments.isLineWrappingEnabled.reconfigure(extensions.isLineWrappingEnabled(true)),
@@ -428,58 +567,201 @@ function clearAllDirtyLines() {
   secondaryEditors.forEach((e) => {
     e.view.dispatch({ effects: clearDirtyLines.of(null) });
   });
+  updateDirtyCount();
+}
+
+function dirtyLinePositions(view) {
+  const positions = [];
+  try {
+    const field = view.state.field(dirtyLineField, false);
+    if (!field) return positions;
+    const iter = field.iter();
+    while (iter.value) {
+      positions.push(iter.from);
+      iter.next();
+    }
+  } catch (_) {}
+  return positions;
+}
+
+function flashCommittedLines() {
+  window.clearTimeout(appliedLineTimer);
+  for (const view of allEditorViews()) {
+    const positions = dirtyLinePositions(view);
+    if (positions.length) view.dispatch({ effects: flashAppliedLines.of(positions) });
+  }
+  appliedLineTimer = window.setTimeout(() => {
+    allEditorViews().forEach((view) => view.dispatch({ effects: clearAppliedLines.of(null) }));
+    document.body.dataset.updateState = '';
+  }, 720);
 }
 
 function clearQueuedUpdate() {
   if (queuedUpdateTimer) window.clearTimeout(queuedUpdateTimer);
   queuedUpdateTimer = 0;
   queuedTargetCycle = null;
+  queuedSectionName = null;
+  pendingCueStartCycle = null;
+  pendingCueSchedulerCycle = null;
   queueStatusEl.textContent = '';
+  if (document.body.dataset.updateState === 'queued') document.body.dataset.updateState = '';
+  syncGraphPerformance();
 }
 
 async function performEvaluation(allCode, autostart) {
+  const previousEvalCode = lastEvalCode;
+  const previousActiveLoop = activeLoopedSectionName;
+  const sections = parseSections(allCode);
+  const selectedSection = selectedSongSection(allCode);
+  const previousSection = selectedSongSection(previousEvalCode);
+  const loopedSection = sections.find(({ name }) => name === loopedSectionName) || null;
+  const loopChanged = loopedSectionName !== activeLoopedSectionName;
+  const hasPendingCue = Number.isFinite(pendingCueStartCycle);
+  const cueStart = hasPendingCue ? pendingCueStartCycle : selectedSection?.start;
+  const loopCueCycle = loopedSection
+    ? cycleWithinSection(loopedSection, (cueStart ?? loopedSection.start) - loopedSection.start)
+    : null;
+  const loopOffset = loopedSection ? loopCueCycle - loopedSection.start : 0;
+  const shouldCueTimeline = Boolean(selectedSection && (
+    (autostart && !isPlaying) ||
+    lastEvaluatedSongName !== currentSongName ||
+    selectedSection.name !== previousSection?.name ||
+    loopChanged ||
+    hasPendingCue
+  ));
+  if (shouldCueTimeline) songCueTimeline += 1;
   lastEvalCode = allCode;
   clearDiagnostic();
   editor.flash();
+  window.clearTimeout(appliedLineTimer);
+  appliedLineTimer = 0;
+  allEditorViews().forEach((view) => view.dispatch({ effects: clearAppliedLines.of(null) }));
+  document.body.dataset.updateState = 'applying';
   try {
     const tracks = parseTracks(allCode);
     ensureMasterEngine();
     await Promise.all([
-      ensureAudioReady(),
+      ensureAudioReady({ resume: !pauseRequested }),
       prepareOptionalSystems(allCode),
-      loadSamplePacks(allCode, samples),
+      loadSamplePacks(
+        allCode,
+        samples,
+        (url) => loadBuffer(url, getAudioContext(), 'local audio'),
+      ),
     ]);
-    const performanceCode = routeTracksForPlayback(allCode, tracks);
+    let performanceCode = routeTracksForPlayback(allCode, tracks);
+    if (loopedSection) {
+      performanceCode += `\nall(pattern => pattern.ribbon(${loopedSection.start}, ${loopedSection.end - loopedSection.start}).early(${loopOffset}).timeline(${songCueTimeline}))`;
+    } else if (selectedSection) {
+      performanceCode += `\nall(pattern => pattern.early(${cueStart}).timeline(${songCueTimeline}))`;
+    }
+    const cueSchedulerCycle = pendingCueSchedulerCycle ?? schedulerCycle();
     await editor.repl.evaluate(performanceCode, autostart);
-    currentSections = parseSections(allCode);
-    clearAllDirtyLines();
+    if (shouldCueTimeline) {
+      playbackSourceCycle = loopCueCycle ?? cueStart;
+      playbackSchedulerCycle = cueSchedulerCycle;
+    }
+    activeLoopedSectionName = loopedSection?.name || null;
+    pendingCueStartCycle = null;
+    pendingCueSchedulerCycle = null;
+    queuedSectionName = null;
+    lastEvaluatedSongName = currentSongName;
+    editorsContainer.dataset.evaluatedLength = String(allCode.length);
+    if (getAllCode() === allCode) {
+      flashCommittedLines();
+      clearAllDirtyLines();
+      document.body.dataset.updateState = 'applied';
+    } else {
+      document.body.dataset.updateState = 'pending';
+      queueStatusEl.textContent = 'newer edits pending';
+    }
     updateDocumentState();
+    syncGraphPerformance();
   } catch (error) {
+    lastEvalCode = previousEvalCode;
+    activeLoopedSectionName = previousActiveLoop;
+    loopedSectionName = previousActiveLoop;
+    pendingCueStartCycle = null;
+    pendingCueSchedulerCycle = null;
+    queuedSectionName = null;
+    updateMode();
+    document.body.dataset.updateState = 'failed';
     showDiagnostic(error);
     throw error;
   }
 }
 
-async function evaluateAll(autostart = true, { immediate = false } = {}) {
+async function evaluateAll(
+  autostart = true,
+  {
+    immediate = false,
+    cueSectionName = null,
+    cueStartCycle = null,
+    preserveLoopPosition = false,
+    finishCurrentSection = false,
+  } = {},
+) {
   const allCode = getAllCode();
   saveRecoverySnapshot(currentSongName, allCode, 'run');
   if (isPlaying && !immediate) {
     const scheduler = editor.repl.scheduler;
     const now = Number(scheduler.now());
     const cps = Number(scheduler.cps) || 1;
-    const timing = nextCycleTiming(now, cps, -12);
+    const selected = selectedSongSection(allCode);
+    const current = selectedSongSection(lastEvalCode);
+    const performance = graphPerformanceSnapshot();
+    const sectionSelectionChanged = selected?.name !== current?.name;
+    const waitsForSectionEnd = finishCurrentSection || Boolean(cueSectionName) || sectionSelectionChanged;
+    const currentPlaybackSection = waitsForSectionEnd ? performance.currentSection : null;
+    const timing = currentPlaybackSection
+      ? sectionEndTiming(now, cps, currentPlaybackSection, performance.cycle)
+      : nextCycleTiming(now, cps, -12);
+    const activeLoop = parseSections(lastEvalCode || allCode)
+      .find(({ name }) => name === activeLoopedSectionName);
     clearQueuedUpdate();
+    queuedSectionName = cueSectionName || (selected?.name !== current?.name ? selected?.name || null : null);
+    const cueSection = cueSectionName
+      ? parseSections(allCode).find(({ name }) => name === cueSectionName)
+      : null;
+    if (Number.isFinite(cueStartCycle)) pendingCueStartCycle = cueStartCycle;
+    else if (cueSection && !preserveLoopPosition) pendingCueStartCycle = cueSection.start;
+    if (preserveLoopPosition && activeLoop) {
+      pendingCueStartCycle = cycleWithinSection(
+        activeLoop,
+        timing.targetCycle - playbackSchedulerCycle,
+      );
+    }
     queuedTargetCycle = timing.targetCycle;
-    queueStatusEl.textContent = `queued · cycle ${queuedTargetCycle + 1}`;
+    pendingCueSchedulerCycle = currentPlaybackSection ? timing.targetCycle : null;
+    queueStatusEl.textContent = '';
+    document.body.dataset.updateState = 'queued';
     queuedUpdateTimer = window.setTimeout(() => {
       queuedUpdateTimer = 0;
       queuedTargetCycle = null;
       queueStatusEl.textContent = '';
-      performEvaluation(allCode, autostart).catch(() => {});
+      performEvaluation(getAllCode(), autostart).catch(() => {});
     }, timing.milliseconds);
+    updateMode();
     return;
   }
   clearQueuedUpdate();
+  const cueSection = cueSectionName
+    ? parseSections(allCode).find(({ name }) => name === cueSectionName)
+    : null;
+  if (Number.isFinite(cueStartCycle)) {
+    pendingCueStartCycle = cueStartCycle;
+    pendingCueSchedulerCycle = schedulerCycle();
+  } else if (cueSection && !preserveLoopPosition) pendingCueStartCycle = cueSection.start;
+  if (preserveLoopPosition && activeLoopedSectionName) {
+    const activeLoop = parseSections(lastEvalCode || allCode)
+      .find(({ name }) => name === activeLoopedSectionName);
+    if (activeLoop) {
+      pendingCueStartCycle = cycleWithinSection(
+        activeLoop,
+        schedulerCycle() - playbackSchedulerCycle,
+      );
+    }
+  }
   await performEvaluation(allCode, autostart);
 }
 
@@ -540,6 +822,7 @@ function createSecondaryEditor(initialCode = editor.code, columnIndex = 1) {
         dirtyLineField,
         errorLineField,
         secHighlightField,
+        ...scoreVisualExtensions,
         ...inlineControlExtensions,
         customThemeColors,
         Prec.highest(syntaxHighlighting(customHighlight)),
@@ -552,6 +835,7 @@ function createSecondaryEditor(initialCode = editor.code, columnIndex = 1) {
   view.dom.addEventListener('keydown', onEditorKeydown, { capture: true });
   view.contentDOM.setAttribute('aria-label', `Song code, column ${columnIndex + 1}`);
   view.scrollDOM.tabIndex = 0;
+  bindPlaybackScrollGuard(view);
   const entry = { view, root: panel };
   secondaryEditors.push(entry);
   return entry;
@@ -579,14 +863,106 @@ function setColumnCount(n) {
   });
 }
 
-createVisualizerModeController(document.getElementById('visualizer-mode'));
+async function togglePlaybackPause() {
+  if (!isPlaying) return;
+  if (pauseRequested || !audioIsRunning()) {
+    pauseRequested = false;
+    try {
+      await ensureAudioReady();
+    } catch (error) {
+      pauseRequested = true;
+      throw error;
+    }
+  } else {
+    pauseRequested = true;
+    updateMode();
+    const context = activeAudioContext || getAudioContext();
+    await context.suspend();
+    silenceMasterEngine();
+  }
+  updateMode();
+}
+
+function toggleSectionLoop(sectionName) {
+  const section = parseSections(getAllCode()).find(({ name }) => name === sectionName);
+  if (!section) return;
+  const disabling = loopedSectionName === sectionName;
+  if (!disabling) {
+    const performance = graphPerformanceSnapshot();
+    const preserveCurrentPosition = isPlaying && performance.currentSection?.name === sectionName;
+    loopedSectionName = sectionName;
+    clearQueuedUpdate();
+    replaceAllCode(setSelectedSongSection(getAllCode(), sectionName));
+    pauseRequested = false;
+    evaluateAll(true, {
+      immediate: !preserveCurrentPosition,
+      cueSectionName: preserveCurrentPosition ? null : sectionName,
+      cueStartCycle: preserveCurrentPosition ? section.start : null,
+      finishCurrentSection: preserveCurrentPosition,
+    }).catch(showDiagnostic);
+    return;
+  }
+
+  loopedSectionName = null;
+  clearQueuedUpdate();
+  syncGraphPerformance();
+  if (isPlaying) {
+    evaluateAll(true, {
+      immediate: true,
+      preserveLoopPosition: true,
+    }).catch(showDiagnostic);
+  }
+}
+
+const visualizerController = createInlineVisualizerController();
+
+function applyImmediateTrackMix(code) {
+  const graph = buildSongGraph(code);
+  for (const track of graph.tracks) {
+    const audible = !track.muted && (graph.soloKey === 'all' || graph.soloKey === track.key);
+    setOrbitAudibility(track.orbit, audible);
+  }
+}
+
+graphController = createGraphViewController({
+  root: document.getElementById('graph-view'),
+  editors: editorsContainer,
+  codeButton: document.getElementById('code-view-btn'),
+  graphButton: document.getElementById('graph-view-btn'),
+  getCode: getAllCode,
+  getSongKey: () => currentSongName || 'Untitled',
+  onCodeChange: (
+    code,
+    { immediate = false, section = null, deferPlayback = false, trackControl = null } = {},
+  ) => {
+    if (section && loopedSectionName) loopedSectionName = null;
+    if (isPlaying && trackControl) applyImmediateTrackMix(code);
+    replaceAllCode(code);
+    if (isPlaying && !deferPlayback) {
+      evaluateAll(true, {
+        immediate,
+        cueSectionName: section,
+        finishCurrentSection: Boolean(section),
+      }).catch(() => {});
+    } else syncGraphPerformance();
+  },
+  onPlaySection: (code, section) => {
+    if (loopedSectionName) loopedSectionName = null;
+    clearQueuedUpdate();
+    replaceAllCode(code);
+    pauseRequested = false;
+    evaluateAll(true, {
+      immediate: true,
+      cueSectionName: section,
+    }).catch(showDiagnostic);
+  },
+  onToggleSectionLoop: toggleSectionLoop,
+});
 
 let meterFrame = 0;
 let masterLevel = -1;
 let masterPeak = -1;
 let limiterLabel = '';
-let transportCycle = '';
-let transportSection = '';
 
 function setMeterScale(element, next, previous) {
   const rounded = Math.round(next * 100) / 100;
@@ -618,51 +994,33 @@ function updateMasterMeter() {
     masterPeakEl.style.left = `${peakPercent}%`;
   }
   const hot = meter.peakDb > -1.1 || meter.limiterDb < -0.2;
-  const nextLimiterLabel = hot ? `lim ${meter.limiterDb.toFixed(1)} dB` : 'safe';
+  const nextLimiterLabel = hot ? `lim ${meter.limiterDb.toFixed(1)} dB` : '';
   if (nextLimiterLabel !== limiterLabel) {
     limiterLabel = nextLimiterLabel;
     limiterStateEl.textContent = limiterLabel;
     limiterStateEl.classList.toggle('hot', hot);
   }
-  let nextCycle = isPlaying ? (transportCycle || 'cycle 1') : 'cycle 1';
-  let nextSection = currentSections[0]?.name || 'loop';
-  if (isPlaying && audioIsRunning()) {
-    try {
-      const cycle = Number(editor.repl.scheduler.now());
-      const cycleInSong = currentSections.length
-        ? ((Math.floor(cycle) % currentSections.at(-1).end) + currentSections.at(-1).end) % currentSections.at(-1).end
-        : Math.floor(cycle);
-      const section = sectionAtCycle(currentSections, cycle);
-      nextCycle = `cycle ${cycleInSong + 1}`;
-      nextSection = section?.name || 'loop';
-    } catch (_) {}
-  }
-  if (nextCycle !== transportCycle) {
-    transportCycle = nextCycle;
-    cycleStatusEl.textContent = transportCycle;
-  }
-  if (nextSection !== transportSection) {
-    transportSection = nextSection;
-    sectionStatusEl.textContent = transportSection;
-  }
+  syncGraphPerformance();
   scheduleMeterUpdate();
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && meterFrame) {
-    window.clearTimeout(meterFrame);
-    meterFrame = 0;
+  if (document.hidden) {
+    markAudioOutputForWake();
+    if (meterFrame) {
+      window.clearTimeout(meterFrame);
+      meterFrame = 0;
+    }
   } else if (!document.hidden && !meterFrame) {
     updateMasterMeter();
   }
-  if (!document.hidden && isPlaying && !audioIsRunning()) {
-    ensureAudioReady().then(updateMode).catch(() => updateMode());
-  }
+  if (!document.hidden) wakeAudioAfterFocus();
 });
 
 /* ── Ripples (canvas-based, one canvas per scroller) ──────── */
 
 const RIPPLE_DURATION = 400; // ms per ripple animation
+const MAX_ACTIVE_RIPPLES = 96;
 const rippleCanvases = new Map(); // scroller -> { canvas, ctx, w, h }
 const activeRipples = []; // { scroller, x, y, color, gain, startTime }
 let rippleRAF = 0; // 0 = not running
@@ -680,10 +1038,10 @@ function getOrCreateRippleCanvas(scroller) {
   return entry;
 }
 
-/** Sync canvas size to scroller's full scroll extent (only when changed) */
+/** Keep each ripple canvas to the visible editor viewport instead of the full document. */
 function syncCanvasSize(scroller, entry) {
-  const w = scroller.scrollWidth;
-  const h = scroller.scrollHeight;
+  const w = scroller.clientWidth;
+  const h = scroller.clientHeight;
   if (w !== entry.w || h !== entry.h) {
     entry.canvas.width = w;
     entry.canvas.height = h;
@@ -692,10 +1050,12 @@ function syncCanvasSize(scroller, entry) {
     entry.w = w;
     entry.h = h;
   }
+  entry.canvas.style.transform = `translate(${scroller.scrollLeft}px, ${scroller.scrollTop}px)`;
 }
 
 function spawnRipple(scroller, x, y, color, gain) {
   getOrCreateRippleCanvas(scroller);
+  if (activeRipples.length >= MAX_ACTIVE_RIPPLES) activeRipples.shift();
   activeRipples.push({ scroller, x, y, color, gain, startTime: performance.now() });
   // Start draw loop if not already running
   if (!rippleRAF) rippleRAF = requestAnimationFrame(drawRipples);
@@ -726,14 +1086,13 @@ function drawRipples() {
     if (!entry) continue;
     syncCanvasSize(scroller, entry);
     const ctx = entry.ctx;
+    ctx.clearRect(0, 0, entry.w, entry.h);
 
     // Visible region for culling
     const vx0 = scroller.scrollLeft - 150;
     const vy0 = scroller.scrollTop - 150;
     const vx1 = vx0 + scroller.clientWidth + 300;
     const vy1 = vy0 + scroller.clientHeight + 300;
-
-    ctx.clearRect(vx0, vy0, vx1 - vx0, vy1 - vy0);
 
     // Batch ripples by color+lineWidth to minimise state changes
     // Sort by color key so same-color ripples are grouped
@@ -755,7 +1114,12 @@ function drawRipples() {
 
       let group = colorGroups.get(key);
       if (!group) { group = { color: r.color, lw, items: [] }; colorGroups.set(key, group); }
-      group.items.push({ x: r.x, y: r.y, radius, opacity });
+      group.items.push({
+        x: r.x - scroller.scrollLeft,
+        y: r.y - scroller.scrollTop,
+        radius,
+        opacity,
+      });
     }
 
     // Draw each batch: one beginPath + multiple arcs per stroke call
@@ -938,37 +1302,38 @@ function findNoteLocation(hap) {
  * Ripples emit on the highlight frame at a fixed rate.
  */
 const liveHaps = new Map(); // uid -> { loc, color, gain, lastEmit }
-const RIPPLE_SUSTAIN_INTERVAL = 250; // ms between ripples for held notes
+const RIPPLE_SUSTAIN_INTERVAL = 500; // ms between ripples for held notes
 
 const _origHighlight = editor.highlight.bind(editor);
-const HIGHLIGHT_INTERVAL = 33; // ~30fps throttle for highlights
+const HIGHLIGHT_INTERVAL = 100; // 10fps is sufficient for score tracking
 let lastHighlightTime = 0;
+let lastGraphCycleTime = null;
+const graphPlaybackView = document.getElementById('graph-view');
 
-/** Stable UID for a hap — avoid per-frame string concat */
-function hapUid(hap) {
-  return hap.whole.begin * 1e6 + hap.whole.end; // numeric key, no string alloc
+function graphHapsForFrame(activeHaps, time) {
+  const cycleTime = Number(time);
+  const graphHaps = collectGraphActivityHaps(
+    activeHaps,
+    editor.drawer.visibleHaps || [],
+    lastGraphCycleTime,
+    cycleTime,
+  );
+  lastGraphCycleTime = cycleTime;
+  return graphHaps;
 }
 
-editor.highlight = function (haps, time) {
-  const nowMs = performance.now();
-
-  // Throttle to ~30fps, but always run if there's a new onset
-  if (nowMs - lastHighlightTime < HIGHLIGHT_INTERVAL) {
-    let hasNewOnset = false;
-    for (let i = 0; i < haps.length; i++) {
-      const h = haps[i];
-      if (h.context?.locations && h.whole && !activeHapIds.has(hapUid(h))) {
-        hasNewOnset = true;
-        break;
-      }
-    }
-    if (!hasNewOnset) return;
-  }
-  lastHighlightTime = nowMs;
-
-  // Track onsets — record timestamp when a hap first appears
-  currentHapIds.clear();
+function musicalHapsFrom(haps) {
+  const musicalHaps = [];
   for (const hap of haps) {
+    const filtered = filterMusicalLocations(hap);
+    if (filtered.context?.locations?.length) musicalHaps.push(filtered);
+  }
+  return musicalHaps;
+}
+
+function updateOnsets(musicalHaps, nowMs) {
+  currentHapIds.clear();
+  for (const hap of musicalHaps) {
     if (!hap.context?.locations || !hap.whole) continue;
     const uid = hapUid(hap);
     currentHapIds.add(uid);
@@ -983,6 +1348,69 @@ editor.highlight = function (haps, time) {
       onsetTimestamps.delete(uid);
     }
   }
+}
+
+function dispatchGraphActivity(haps, time, nowMs) {
+  if (!graphPlaybackView || graphPlaybackView.hidden) return;
+  const activations = new Map();
+  for (const hap of haps) {
+    if (!hap.context?.locations || !hap.whole) continue;
+    const onsetTime = onsetTimestamps.get(hapUid(hap));
+    const onset = onsetTime !== undefined && nowMs - onsetTime < ONSET_FLASH_MS;
+    for (const loc of hap.context.locations) {
+      if (loc.start < 0 || loc.end > lastEvalCode.length || loc.start >= loc.end) continue;
+      const key = `${loc.start}:${loc.end}`;
+      const previous = activations.get(key);
+      activations.set(key, {
+        from: loc.start,
+        to: loc.end,
+        label: lastEvalCode.slice(loc.start, loc.end),
+        color: hap.value?.color || previous?.color || '#ffffff',
+        onset: onset || previous?.onset || false,
+      });
+    }
+  }
+  document.dispatchEvent(new CustomEvent('strood:note-activity', {
+    detail: { time, activations: [...activations.values()] },
+  }));
+}
+
+/** Stable UID for a hap — avoid per-frame string concat */
+function hapUid(hap) {
+  return hap.whole.begin * 1e6 + hap.whole.end; // numeric key, no string alloc
+}
+
+editor.highlight = function (haps, time) {
+  const nowMs = performance.now();
+  const graphVisible = graphPlaybackView && !graphPlaybackView.hidden;
+  const editorHighlightDue = nowMs - lastHighlightTime >= HIGHLIGHT_INTERVAL;
+  if (!graphVisible) lastGraphCycleTime = null;
+  if (!graphVisible && !editorHighlightDue) return;
+
+  if (graphVisible) {
+    const graphMusicalHaps = musicalHapsFrom(graphHapsForFrame(haps, time));
+    updateOnsets(graphMusicalHaps, nowMs);
+    dispatchGraphActivity(graphMusicalHaps, time, nowMs);
+  }
+
+  if (!editorHighlightDue) return;
+  lastHighlightTime = nowMs;
+  const musicalHaps = musicalHapsFrom(haps);
+  if (!graphVisible) updateOnsets(musicalHaps, nowMs);
+
+  if (nowMs < playbackScrollGuardUntil) return;
+
+  // CodeMirror only needs decorations for source locations currently on screen.
+  // Filtering here prevents dense off-screen tracks from rebuilding decoration sets.
+  const visibleRanges = editor.editor.visibleRanges;
+  const visibleHaps = [];
+  for (const hap of musicalHaps) {
+    const locations = hap.context?.locations;
+    if (!locations?.length) continue;
+    if (locations.some((loc) => visibleRanges.some((range) => loc.end >= range.from && loc.start <= range.to))) {
+      visibleHaps.push(hap);
+    }
+  }
 
   // Filter to musical locations only, then apply white flash for onsets
   // Reuse the array when possible — only allocate new hap objects for flashing onsets
@@ -993,28 +1421,17 @@ editor.highlight = function (haps, time) {
 
   let mixedHaps;
   if (hasFlash) {
-    mixedHaps = haps.map(h => {
-      const filtered = filterMusicalLocations(h);
-      if (!filtered.whole) return filtered;
-      const uid = hapUid(filtered);
+    mixedHaps = visibleHaps.map(h => {
+      if (!h.whole) return h;
+      const uid = hapUid(h);
       const onsetTime = onsetTimestamps.get(uid);
       if (onsetTime !== undefined && nowMs - onsetTime < ONSET_FLASH_MS) {
-        return { ...filtered, value: { ...filtered.value, color: '#ffffff', markcss: 'outline: solid 4px #ffffff' } };
+        return { ...h, value: { ...h.value, color: '#ffffff', markcss: 'outline: solid 4px #ffffff' } };
       }
-      return filtered;
+      return h;
     });
   } else {
-    // No flashes active — avoid allocating a new array if filterMusicalLocations is a no-op for all
-    let anyFiltered = false;
-    for (let i = 0; i < haps.length; i++) {
-      if (filterMusicalLocations(haps[i]) !== haps[i]) { anyFiltered = true; break; }
-    }
-    if (anyFiltered) {
-      mixedHaps = new Array(haps.length);
-      for (let i = 0; i < haps.length; i++) mixedHaps[i] = filterMusicalLocations(haps[i]);
-    } else {
-      mixedHaps = haps; // zero-alloc path: pass through unchanged
-    }
+    mixedHaps = visibleHaps;
   }
   _origHighlight(mixedHaps, time);
 
@@ -1023,15 +1440,18 @@ editor.highlight = function (haps, time) {
     for (let i = 0; i < secondaryEditors.length; i++) {
       const sec = secondaryEditors[i];
       const docLen = sec.view.state.doc.length;
+      const secRanges = sec.view.visibleRanges;
       const marks = [];
-      for (const hap of haps) {
+      for (const originalHap of haps) {
+        const hap = filterMusicalLocations(originalHap);
         if (!hap.context?.locations || !hap.whole) continue;
         const color = hap.value?.color ?? 'var(--foreground)';
         const style = hap.value?.markcss || `outline: solid 2px ${color}`;
         for (const loc of hap.context.locations) {
           const from = loc.start;
           const to = loc.end;
-          if (from >= 0 && to <= docLen && from < to) {
+          const isVisible = secRanges.some((range) => to >= range.from && from <= range.to);
+          if (isVisible && from >= 0 && to <= docLen && from < to) {
             marks.push(Decoration.mark({ attributes: { style } }).range(from, to));
           }
         }
@@ -1047,7 +1467,7 @@ editor.highlight = function (haps, time) {
   const now = performance.now();
   currentRippleIds.clear();
 
-  for (const hap of haps) {
+  for (const hap of visibleHaps) {
     if (!hap.context?.locations || !hap.whole) continue;
     const noteLoc = findNoteLocation(hap);
     if (!noteLoc) continue;
@@ -1079,13 +1499,26 @@ editor.highlight = function (haps, time) {
   }
 };
 
+function setPerformanceMode(enabled) {
+  performanceMode = Boolean(enabled);
+  document.body.classList.toggle('performance-mode', performanceMode);
+  document.body.dataset.performance = performanceMode ? 'on' : 'off';
+  requestAnimationFrame(() => allEditorViews().forEach((view) => view.requestMeasure()));
+}
+
 /* ── Keyboard handler (all shortcuts) ───────────────────── */
 async function onEditorKeydown(e) {
   const ctrl = e.ctrlKey || e.metaKey;
-  const handledKeys = ['Enter', 'm', 'w', '1', '2', '3', 'u', '.', 's', 'p', 'o', 'n'];
+  const handledKeys = ['Enter', 'm', 'w', '1', '2', '3', 'u', '.', 's', 'p', 'o', 'n', 'f'];
   if (ctrl && handledKeys.includes(e.key)) e.stopPropagation();
 
   const view = e.currentTarget.cmView?.view || editor.editor;
+
+  if (ctrl && e.shiftKey && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    setPerformanceMode(!performanceMode);
+    return;
+  }
 
   // Ctrl+Enter — evaluate
   if (ctrl && e.key === 'Enter') {
@@ -1213,6 +1646,7 @@ async function saveSong() {
 
 function loadSong(code, name = null, version = null, savedCode = code) {
   replaceAllCode(code);
+  clearAllDirtyLines();
   localStorage.setItem('strudel_code', code);
   if (name) {
     currentSongName = name;
@@ -1227,9 +1661,9 @@ function loadSong(code, name = null, version = null, savedCode = code) {
     localStorage.removeItem('strudel_song_name');
   }
   pendingExternalUpdate = null;
-  currentSections = parseSections(code);
   clearDiagnostic();
   updateDocumentState();
+  graphController?.refresh();
   closeSongBrowser();
 }
 
@@ -1469,18 +1903,39 @@ editor.editor.dom.addEventListener('keydown', onEditorKeydown, { capture: true }
 editor.editor.contentDOM.setAttribute('aria-label', 'Song code');
 editor.editor.scrollDOM.tabIndex = 0;
 stampDocumentLength(editor.editor);
+bindPlaybackScrollGuard(editor.editor);
 editorsContainer.addEventListener('strood:inline-control-commit', () => {
   if (isPlaying) evaluateAll().catch(() => {});
 });
+document.addEventListener('strood:patch-sound-focus', (event) => {
+  const sound = event.detail?.sound || null;
+  document.body.dataset.patchSound = sound || '';
+  document.querySelectorAll('.cm-inline-choice').forEach((choice) => {
+    choice.classList.toggle('is-patch-linked', Boolean(sound && choice.dataset.smartValue === sound));
+  });
+  allEditorViews().forEach((view) => view.dispatch({ effects: setPatchSoundLink.of(sound) }));
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && performanceMode && !document.querySelector('[role="dialog"]')) {
+    setPerformanceMode(false);
+  }
+}, { capture: true });
 document.getElementById('diagnostic-close').addEventListener('click', clearDiagnostic);
 runBtn.addEventListener('click', () => {
-  if (isPlaying && !audioIsRunning()) {
-    ensureAudioReady().then(updateMode).catch(showDiagnostic);
+  if (isPlaying) {
+    togglePlaybackPause().catch(showDiagnostic);
     return;
   }
   evaluateAll().catch(() => {});
 });
-stopBtn.addEventListener('click', () => { clearQueuedUpdate(); editor.stop(); });
+stopBtn.addEventListener('click', () => {
+  if (!isPlaying) return;
+  clearQueuedUpdate();
+  editor.stop();
+});
+updateBtn.addEventListener('click', () => {
+  evaluateAll().catch(() => {});
+});
 document.getElementById('save-btn').addEventListener('click', saveSong);
 document.getElementById('open-btn').addEventListener('click', showSongBrowser);
 document.getElementById('new-btn').addEventListener('click', newSong);
@@ -1488,6 +1943,7 @@ document.getElementById('patch-btn').addEventListener('click', () => openPatchEd
 songNameEl.addEventListener('click', showSongBrowser);
 updateMode();
 updateMasterMeter();
+visualizerController.refresh();
 
 /* ── Startup: restore last synced song from disk ────────── */
 (async () => {
