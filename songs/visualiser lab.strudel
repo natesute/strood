@@ -1,0 +1,53 @@
+// Visualiser lab
+// A small scene that exercises the newer visualisers side by side:
+// interference, overtones, resonance, phase portrait, pendulum wave.
+setcpm(112/4)
+
+// Performance mix
+const master = .3
+const solo = 'all'
+const padMix = { gain: .7, pan: .5, mute: false }
+const leadMix = { gain: .5, pan: .5, mute: false }
+const drumMix = { gain: .8, pan: .5, mute: false }
+const track = (
+  name,
+  pattern,
+  { gain = 1, pan = null, mute = false } = {}
+) => {
+  const level = master * gain * (!mute && (solo === 'all' || solo === name) ? 1 : 0)
+  const balanced = pattern.mul({ gain: level })
+  return pan === null ? balanced : balanced.pan(pan)
+}
+
+// Fifth, triad, octave, spread triad — watch the overtone combs align on the
+// consonances, the ripple field tighten, and the orbit envelopes change figure.
+const padNotes = note("<[c3,g3] [c3,e3,g3] [c3,c4] [c3,g3,e4]>").slow(2).clip(1)
+const padVoice = padNotes
+  .sound("sawtooth")
+  .lpf(1200)
+  .release(.1)
+  ._interference({ size: 200 })
+  ._overtones({ width: 520, height: 120 })
+  ._resonance({ size: 200 })
+
+// @track pad | Interval pad
+pad$: track('pad', padVoice.orbit(1).color("#6fd6ff"), padMix)
+
+// A simple line for the phase portrait to knot up.
+const leadNotes = note("c4 eb4 g4 bb4 c5 bb4 g4 eb4").slow(2).clip(1)
+const leadVoice = leadNotes
+  .sound("triangle")
+  .lpf(2400)
+  ._phase({ size: 200 })
+
+// @track lead | Phase lead
+lead$: track('lead', leadVoice.orbit(2).color("#7dffb0"), leadMix)
+
+// Kick–snare with a busier back half, so the pendulums pump and then settle.
+const drumLine = s("<[bd hh sd hh] [bd hh sd [hh hh]] [bd hh sd hh] [bd bd sd hh*3]>")
+const drumVoice = drumLine
+  .bank("RolandTR909")
+  ._pendulum({ size: 200, count: 13, span: 4 })
+
+// @track drums | Pendulum drums
+drums$: track('drums', drumVoice.orbit(3).color("#ffd27a"), drumMix)

@@ -4,7 +4,9 @@ let patchEditorPromise = null;
 const registeredPatches = new Set();
 
 const PATCH_SOUNDS = /\.sound\s*\(\s*["'](vox|acid|lush|glitch|init)["']/gi;
-const CUSTOM_VISUALIZERS = /\._(?:lissajous|orbit|tonnetz|cymatics|harmonics|helix|epicycles)\b/;
+const PATCH_SOUND_VARIABLES = /\.sound\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/g;
+const PATCH_NAME = /^(?:vox|acid|lush|glitch|init)$/i;
+const CUSTOM_VISUALIZERS = /\._(?:spiral|scope|lissajous|orbit|tonnetz|cymatics|harmonics|helix|epicycles|phase|interference|overtones|pendulum|resonance)\b/;
 const PATCH_LOADERS = {
   init: () => import('../synth-modules/patches/init.json'),
   acid: () => import('../synth-modules/patches/acid-bass.json'),
@@ -14,7 +16,12 @@ const PATCH_LOADERS = {
 };
 
 export function referencedPatchSounds(code) {
-  return [...new Set([...code.matchAll(PATCH_SOUNDS)].map((match) => match[1].toLowerCase()))];
+  const names = [...code.matchAll(PATCH_SOUNDS)].map((match) => match[1].toLowerCase());
+  for (const match of code.matchAll(PATCH_SOUND_VARIABLES)) {
+    const assignment = new RegExp(`\\bconst\\s+${match[1]}\\s*=\\s*(["'])([^"']+)\\1`).exec(code);
+    if (assignment && PATCH_NAME.test(assignment[2])) names.push(assignment[2].toLowerCase());
+  }
+  return [...new Set(names)];
 }
 
 export function needsModularSynth(code) {

@@ -1,17 +1,151 @@
 import { registerWidget, setWidget } from '@strudel/codemirror';
 import { getFrequency, freqToMidi, midiToFreq } from '@strudel/core';
+import { analysers, drawTimeScope, getAnalyzerData } from '@strudel/webaudio';
+
+const DEFAULT_PIXEL_RATIO = Math.min(window.devicePixelRatio || 1, 1.5);
+const visibleCanvases = new WeakSet();
+const observedCanvases = new WeakSet();
+const graphVisibleCanvases = globalThis.__stroodGraphVisibleCanvases ||= new Set();
+const visualizerRegistry = globalThis.__stroodVisualizerRegistry ||= new Map();
+const VISUALIZERS_KEY = 'strood:visualizers-enabled';
+const _cymaticsCache = new Map();
+globalThis.__stroodVisualizersEnabled ??= localStorage.getItem(VISUALIZERS_KEY) !== 'false';
+const canvasObserver = typeof IntersectionObserver === 'undefined'
+  ? null
+  : new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) visibleCanvases.add(entry.target);
+        else visibleCanvases.delete(entry.target);
+      }
+    }, { rootMargin: '140px 0px' });
+
+function observeCanvas(canvas) {
+  if (!canvasObserver || observedCanvases.has(canvas)) return;
+  observedCanvases.add(canvas);
+  canvasObserver.observe(canvas);
+}
+
+function visualizersEnabled() {
+  return globalThis.__stroodVisualizersEnabled !== false;
+}
+
+function setCanvasBuffer(entry, enabled) {
+  if (!entry?.canvas) return;
+  entry.canvas.width = enabled ? entry.pixelWidth : 1;
+  entry.canvas.height = enabled ? entry.pixelHeight : 1;
+  if (!enabled) entry.canvas.getContext('2d')?.clearRect(0, 0, 1, 1);
+}
+
+document.addEventListener('strood:visualizers-enabled', (event) => {
+  const enabled = Boolean(event.detail?.enabled);
+  globalThis.__stroodVisualizersEnabled = enabled;
+  for (const entry of visualizerRegistry.values()) setCanvasBuffer(entry, enabled);
+  if (!enabled) _cymaticsCache.clear();
+});
+
+function canvasIsVisible(canvas) {
+  if (!visualizersEnabled()) return false;
+  if (document.hidden) return false;
+  if (graphVisibleCanvases.has(canvas)) return true;
+  if (!canvas.isConnected) return false;
+  if (canvasObserver) return visibleCanvases.has(canvas);
+  const rect = canvas.getBoundingClientRect();
+  return rect.bottom >= -140
+    && rect.top <= window.innerHeight + 140
+    && rect.right >= 0
+    && rect.left <= window.innerWidth;
+}
+
+function createPaintGate(canvas, fps = 24) {
+  const frameLength = 1000 / Math.max(1, fps);
+  let lastPaint = -Infinity;
+  return () => {
+    if (!canvasIsVisible(canvas)) return false;
+    const now = performance.now();
+    if (now - lastPaint < frameLength) return false;
+    lastPaint = now;
+    return true;
+  };
+}
 
 /* ── Canvas helper (replicates widget.mjs:96-105, not exported) ── */
-function getCanvasWidget(id, options = {}) {
-  const { width = 500, height = 60, pixelRatio = window.devicePixelRatio } = options;
+function getCanvasWidget(id, options = {}, method = '') {
+  const { width = 500, height = 60, pixelRatio = DEFAULT_PIXEL_RATIO } = options;
   let canvas = document.getElementById(id) || document.createElement('canvas');
-  canvas.width = width * pixelRatio;
-  canvas.height = height * pixelRatio;
   canvas.style.width = width + 'px';
   canvas.style.height = height + 'px';
   setWidget(id, canvas);
+  observeCanvas(canvas);
+  canvas.dataset.visualizerMethod = method;
+  const entry = {
+    id,
+    method,
+    canvas,
+    pixelWidth: Math.max(1, Math.round(width * pixelRatio)),
+    pixelHeight: Math.max(1, Math.round(height * pixelRatio)),
+  };
+  visualizerRegistry.set(id, entry);
+  setCanvasBuffer(entry, visualizersEnabled());
+  document.dispatchEvent(new CustomEvent('strood:visualizer-canvas', { detail: { id, method } }));
   return canvas;
 }
+
+// Register Strudel's two built-in visualisers through the same canvas registry
+// as Strood's custom set, so graph nodes can mirror them as well.
+registerWidget('_spiral', (id, options = {}, pat) => {
+  const size = options.size || 275;
+  options = { width: size, height: size, ...options, size: size / 5 };
+  const canvas = getCanvasWidget(id, options, '_spiral');
+  return pat.tag(id).spiral({ ...options, ctx: canvas.getContext('2d'), id });
+});
+
+registerWidget('_scope', (id, options = {}, pat) => {
+  options = {
+    width: 500,
+    height: 60,
+    pos: 0.5,
+    scale: 1,
+    autoScale: true,
+    maxScale: 24,
+    fill: 0.38,
+    ...options,
+  };
+  const canvas = getCanvasWidget(id, options, '_scope');
+  const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps || 30);
+  let displayScale = Math.max(0.01, Number(options.scale) || 1);
+  let hasSignal = false;
+
+  return pat.tag(id).analyze(id).draw((haps) => {
+    if (!shouldPaint()) return;
+    const analyser = analysers[id];
+    if (analyser && options.autoScale !== false) {
+      const samples = getAnalyzerData('time', id);
+      let peak = 0;
+      for (let index = 0; index < samples.length; index += 1) {
+        peak = Math.max(peak, Math.abs(samples[index]));
+      }
+      if (peak > 0.002) {
+        const target = Math.max(0.5, Math.min(
+          Math.max(0.5, Number(options.maxScale) || 24),
+          Math.max(0.1, Math.min(0.48, Number(options.fill) || 0.38)) / peak,
+        ));
+        if (!hasSignal) displayScale = target;
+        else displayScale += (target - displayScale) * (target < displayScale ? 0.55 : 0.16);
+        hasSignal = true;
+      }
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawTimeScope(analyser, {
+      ...options,
+      color: haps[0]?.value?.color || options.color || 'white',
+      scale: displayScale,
+      ctx,
+      id,
+    });
+  }, { id });
+});
 
 /* ── Widget 1: _lissajous — Interval Geometry ──────────── */
 // Consonant intervals draw clean closed curves (3:2 = fifth, 5:4 = third).
@@ -19,10 +153,12 @@ function getCanvasWidget(id, options = {}) {
 registerWidget('_lissajous', (id, options = {}, pat) => {
   const size = options.size || 200;
   options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
+  const canvas = getCanvasWidget(id, options, '_lissajous');
   const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps);
 
   return pat.tag(id).onPaint((_, time, haps, drawTime) => {
+    if (!shouldPaint()) return;
     const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
@@ -80,10 +216,12 @@ registerWidget('_lissajous', (id, options = {}, pat) => {
 registerWidget('_orbit', (id, options = {}, pat) => {
   const size = options.size || 150;
   options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
+  const canvas = getCanvasWidget(id, options, '_orbit');
   const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps);
 
   return pat.tag(id).onPaint((_, time, haps, drawTime) => {
+    if (!shouldPaint()) return;
     const w = canvas.width, h = canvas.height;
     const cx = w / 2, cy = h / 2;
     const radius = Math.min(w, h) * 0.4;
@@ -142,8 +280,9 @@ registerWidget('_orbit', (id, options = {}, pat) => {
 registerWidget('_tonnetz', (id, options = {}, pat) => {
   const size = options.size || 250;
   options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
+  const canvas = getCanvasWidget(id, options, '_tonnetz');
   const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps);
 
   const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
   const lattice = [];
@@ -160,6 +299,7 @@ registerWidget('_tonnetz', (id, options = {}, pat) => {
   }
 
   return pat.tag(id).onPaint((_, time, haps, drawTime) => {
+    if (!shouldPaint()) return;
     const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
@@ -293,15 +433,15 @@ registerWidget('_tonnetz', (id, options = {}, pat) => {
 /* ── Widget 4: _cymatics — Chladni Vibration Patterns ──── */
 // Physical vibrating surfaces produce geometric nodal patterns.
 // Z(x,y) = cos(nπx)cos(mπy) - cos(mπx)cos(nπy), nodal lines where Z≈0.
-const _cymaticsCache = new Map();
-
 registerWidget('_cymatics', (id, options = {}, pat) => {
   const size = options.size || 200;
   options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
+  const canvas = getCanvasWidget(id, options, '_cymatics');
   const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps);
 
   return pat.tag(id).onPaint((_, time, haps, drawTime) => {
+    if (!shouldPaint()) return;
     const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
@@ -343,6 +483,9 @@ registerWidget('_cymatics', (id, options = {}, pat) => {
 
       cached = { imageData, w, h };
       _cymaticsCache.set(cacheKey, cached);
+      if (_cymaticsCache.size > 24) {
+        _cymaticsCache.delete(_cymaticsCache.keys().next().value);
+      }
     }
 
     ctx.putImageData(cached.imageData, 0, 0);
@@ -354,10 +497,12 @@ registerWidget('_cymatics', (id, options = {}, pat) => {
 // y(x) = (A/√n) * sin(nπx) * cos(ωt) — fixed endpoints enforced by sin.
 registerWidget('_harmonics', (id, options = {}, pat) => {
   options = { width: 500, height: 100, ...options };
-  const canvas = getCanvasWidget(id, options);
+  const canvas = getCanvasWidget(id, options, '_harmonics');
   const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps);
 
   return pat.tag(id).onPaint((_, time, haps, drawTime) => {
+    if (!shouldPaint()) return;
     const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
@@ -414,11 +559,13 @@ registerWidget('_helix', (id, options = {}, pat) => {
   const size = options.size || 200;
   const turns = options.turns || 5;
   options = { width: size, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
+  const canvas = getCanvasWidget(id, options, '_helix');
   const ctx = canvas.getContext('2d');
   const rootFreq = 130.81; // C3
+  const shouldPaint = createPaintGate(canvas, options.fps);
 
   return pat.tag(id).onPaint((_, time, haps, drawTime) => {
+    if (!shouldPaint()) return;
     const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
@@ -498,13 +645,15 @@ registerWidget('_epicycles', (id, options = {}, pat) => {
   const size = options.size || 200;
   const harmonicsCount = options.harmonicsCount || 8;
   options = { width: size * 2, height: size, ...options };
-  const canvas = getCanvasWidget(id, options);
+  const canvas = getCanvasWidget(id, options, '_epicycles');
   const ctx = canvas.getContext('2d');
   const trail = new Float32Array(200);
   let trailIdx = 0;
   let lastTrailTime = 0;
+  const shouldPaint = createPaintGate(canvas, options.fps);
 
   return pat.tag(id).onPaint((_, time, haps, drawTime) => {
+    if (!shouldPaint()) return;
     const active = haps.filter(h => h.hasTag(id) && h.isActive(time));
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
@@ -593,3 +742,439 @@ registerWidget('_epicycles', (id, options = {}, pat) => {
   });
 });
 
+/* ── Widget 8: _phase — Audio Phase Portrait ───────────── */
+// The track's real waveform x(t) plotted against a delayed copy x(t−τ),
+// a Takens embedding. Periodic signals close into orbits: pure tones are
+// ellipses, rich timbres are knots, noise is a cloud. τ tracks a quarter
+// period of the sounding pitch, so a held note settles into a stable loop.
+registerWidget('_phase', (id, options = {}, pat) => {
+  const size = options.size || 200;
+  options = { width: size, height: size, ...options };
+  const canvas = getCanvasWidget(id, options, '_phase');
+  const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps || 30);
+  let displayScale = 0;
+
+  return pat.tag(id).analyze(id).onPaint((_, time, haps) => {
+    if (!shouldPaint()) return;
+    const w = canvas.width, h = canvas.height;
+
+    // Persistence: fade the standing trace instead of clearing it.
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.globalCompositeOperation = 'source-over';
+
+    const analyser = analysers[id];
+    if (!analyser) return;
+    const samples = getAnalyzerData('time', id);
+    let peak = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const magnitude = Math.abs(samples[i]);
+      if (magnitude > peak) peak = magnitude;
+    }
+    if (peak < 0.004) return;
+
+    const target = 0.44 / peak;
+    displayScale = displayScale === 0 ? target : displayScale + (target - displayScale) * 0.15;
+
+    const active = haps.filter(hap => hap.hasTag(id) && hap.isActive(time));
+    let tau = 0;
+    for (const hap of active) {
+      try {
+        tau = Math.round(analyser.context.sampleRate / (4 * getFrequency(hap)));
+        break;
+      } catch (_) {}
+    }
+    if (!tau) tau = 96;
+    tau = Math.max(2, Math.min(tau, samples.length >> 2));
+
+    const cx = w / 2, cy = h / 2;
+    const amp = Math.min(w, h) * 0.5 * displayScale;
+    ctx.strokeStyle = active[0]?.value?.color || options.color || '#7dffb0';
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i + tau < samples.length; i += 2) {
+      const x = cx + samples[i] * amp;
+      const y = cy - samples[i + tau] * amp;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  });
+});
+
+/* ── Widget 9: _interference — Chord Ripple Field ──────── */
+// Every sounding note is a wave source on the chroma circle (angle = pitch
+// class, radius = octave) radiating with wavelength ∝ 1/frequency. The
+// summed field is drawn directly: intervals become moiré ratios, detuning
+// becomes drifting spatial beats, held chords become standing patterns.
+registerWidget('_interference', (id, options = {}, pat) => {
+  const size = options.size || 200;
+  options = { width: size, height: size, ...options };
+  const canvas = getCanvasWidget(id, options, '_interference');
+  const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps || 20);
+  let field = null;
+
+  return pat.tag(id).onPaint((_, time, haps) => {
+    if (!shouldPaint()) return;
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const active = haps.filter(hap => hap.hasTag(id) && hap.isActive(time));
+    const sources = [];
+    for (const hap of active) {
+      if (sources.length >= 6) break;
+      try {
+        const freq = getFrequency(hap);
+        const midi = freqToMidi(freq);
+        const chroma = ((midi % 12) + 12) % 12;
+        const octave = Math.max(1, Math.min(7, Math.floor(midi / 12) - 1));
+        const angle = (chroma / 12) * Math.PI * 2 - Math.PI / 2;
+        const radius = (0.08 + (octave - 1) * 0.06) * Math.min(w, h);
+        sources.push({
+          x: w / 2 + radius * Math.cos(angle),
+          y: h / 2 + radius * Math.sin(angle),
+          freq,
+        });
+      } catch (_) {}
+    }
+    if (!sources.length) return;
+
+    // The field is summed on a half-resolution grid and scaled up smoothly.
+    const fw = Math.max(2, Math.round(w / 2));
+    const fh = Math.max(2, Math.round(h / 2));
+    if (!field || field.w !== fw || field.h !== fh) {
+      const buffer = document.createElement('canvas');
+      buffer.width = fw;
+      buffer.height = fh;
+      const bufferCtx = buffer.getContext('2d');
+      // Radial falloff so the pool dissolves at the edge instead of
+      // stopping at the canvas boundary.
+      const vignette = new Float32Array(fw * fh);
+      const vcx = fw / 2, vcy = fh / 2;
+      const vmax = Math.min(fw, fh) / 2;
+      for (let py = 0; py < fh; py++) {
+        for (let px = 0; px < fw; px++) {
+          const distance = Math.hypot(px - vcx, py - vcy) / vmax;
+          vignette[py * fw + px] = Math.max(0, Math.min(1, 1.9 - 1.9 * distance * distance));
+        }
+      }
+      field = { canvas: buffer, ctx: bufferCtx, image: bufferCtx.createImageData(fw, fh), vignette, w: fw, h: fh };
+    }
+
+    const fmin = Math.min(...sources.map(source => source.freq));
+    const sx = fw / w, sy = fh / h;
+    for (const source of sources) {
+      source.fx = source.x * sx;
+      source.fy = source.y * sy;
+      // Wavelength scales with the true period, so a fifth above the root
+      // ripples at exactly 2/3 the root's spacing.
+      const lambda = Math.max(4, (Math.min(fw, fh) / 4.4) * (fmin / source.freq));
+      source.k = (Math.PI * 2) / lambda;
+      source.phase = Math.PI * 2 * (source.freq / fmin) * time * 1.25;
+    }
+
+    const data = field.image.data;
+    const vignette = field.vignette;
+    const norm = 1 / sources.length;
+    let index = 0;
+    for (let py = 0; py < fh; py++) {
+      for (let px = 0; px < fw; px++) {
+        let sum = 0;
+        for (const source of sources) {
+          const dx = px - source.fx;
+          const dy = py - source.fy;
+          sum += Math.cos(Math.sqrt(dx * dx + dy * dy) * source.k - source.phase);
+        }
+        const value = sum * norm;
+        const g = Math.abs(value) ** 0.8;
+        const fade = vignette[index >> 2];
+        if (value > 0) {
+          data[index] = 40 + 215 * g;
+          data[index + 1] = 150 + 105 * g;
+          data[index + 2] = 255;
+          data[index + 3] = 235 * g * fade;
+        } else {
+          data[index] = 10;
+          data[index + 1] = 40 + 60 * g;
+          data[index + 2] = 130 + 125 * g;
+          data[index + 3] = 210 * g * fade;
+        }
+        index += 4;
+      }
+    }
+    field.ctx.putImageData(field.image, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(field.canvas, 0, 0, w, h);
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.beginPath();
+    for (const source of sources) {
+      ctx.moveTo(source.x + 2.5, source.y);
+      ctx.arc(source.x, source.y, 2.5, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  });
+});
+
+/* ── Widget 10: _overtones — Harmonic Coincidence Comb ─── */
+// Helmholtz's explanation of consonance, drawn live. Each note lays its
+// overtone series on a shared log-frequency axis (hue = pitch class).
+// Aligned partials fuse into a steady white column — that alignment IS the
+// consonance. Near misses pulse at their true beat rate |f₁−f₂| in Hz.
+registerWidget('_overtones', (id, options = {}, pat) => {
+  options = { width: 500, height: 110, ...options };
+  const canvas = getCanvasWidget(id, options, '_overtones');
+  const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps || 30);
+  const fLow = 55;
+  const octaves = 6;
+
+  return pat.tag(id).onPaint((_, time, haps) => {
+    if (!shouldPaint()) return;
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    const baseline = h - 5;
+
+    // Octave gridlines (A1..A7) and baseline
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let o = 0; o <= octaves; o++) {
+      const x = (o / octaves) * w;
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, baseline);
+    }
+    ctx.moveTo(0, baseline);
+    ctx.lineTo(w, baseline);
+    ctx.stroke();
+
+    const active = haps.filter(hap => hap.hasTag(id) && hap.isActive(time));
+    if (!active.length) return;
+
+    const partials = [];
+    let noteIndex = 0;
+    for (const hap of active) {
+      if (noteIndex >= 6) break;
+      let f0;
+      try { f0 = getFrequency(hap); } catch (_) { continue; }
+      const chroma = ((Math.round(freqToMidi(f0)) % 12) + 12) % 12;
+      const hue = (chroma / 12) * 360;
+      for (let n = 1; n <= 16; n++) {
+        const freq = f0 * n;
+        const position = Math.log2(freq / fLow) / octaves;
+        if (position < 0 || position > 1) continue;
+        partials.push({ freq, x: position * w, n, hue, note: noteIndex });
+      }
+      noteIndex++;
+    }
+
+    for (const partial of partials) {
+      const height = (baseline - 8) * 0.9 / Math.sqrt(partial.n);
+      ctx.strokeStyle = `hsla(${partial.hue}, 85%, 62%, ${partial.n === 1 ? 0.9 : 0.5})`;
+      ctx.lineWidth = partial.n === 1 ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(partial.x, baseline);
+      ctx.lineTo(partial.x, baseline - height);
+      ctx.stroke();
+    }
+
+    // Coincidences and beats between partials of different notes. Beat
+    // pulsing runs on wall-clock seconds because beat rates are real Hz.
+    partials.sort((a, b) => a.freq - b.freq);
+    const seconds = performance.now() / 1000;
+    for (let i = 0; i < partials.length - 1; i++) {
+      for (let j = i + 1; j < partials.length; j++) {
+        const a = partials[i], b = partials[j];
+        const delta = b.freq - a.freq;
+        if (delta > (a.freq + b.freq) * 0.02) break;
+        if (a.note === b.note) continue;
+        const x = (a.x + b.x) / 2;
+        const height = (baseline - 8) * 0.95 / Math.sqrt(Math.min(a.n, b.n));
+        if (delta < 1.5) {
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+          ctx.lineWidth = 2.5;
+        } else {
+          const pulse = 0.5 + 0.5 * Math.sin(seconds * delta * Math.PI * 2);
+          ctx.strokeStyle = `rgba(255, 210, 120, ${0.15 + 0.6 * pulse})`;
+          ctx.lineWidth = 2;
+        }
+        ctx.beginPath();
+        ctx.moveTo(x, baseline);
+        ctx.lineTo(x, baseline - height);
+        ctx.stroke();
+      }
+    }
+  });
+});
+
+/* ── Widget 11: _pendulum — Pendulum Wave ──────────────── */
+// A column of pendulums whose periods divide the cycle: pendulum k swings
+// base+k times per span, so the row weaves through travelling waves and
+// polyrhythmic shear, snapping back into line exactly on the bar. Note
+// onsets pump the swing energy, so the rhythm's density drives the arc.
+registerWidget('_pendulum', (id, options = {}, pat) => {
+  const size = options.size || 200;
+  const count = options.count || 13;
+  const span = options.span || 4;
+  const base = options.base || 6;
+  options = { width: size, height: size, ...options };
+  const canvas = getCanvasWidget(id, options, '_pendulum');
+  const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps || 30);
+  let energy = 0;
+  let previousTime = null;
+
+  return pat.tag(id).onPaint((_, time, haps) => {
+    if (!shouldPaint()) return;
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    // Every onset since the previous frame pumps the swing; rests let it settle.
+    const cycleTime = Number(time);
+    const continued = previousTime !== null && cycleTime >= previousTime && cycleTime - previousTime < 0.5;
+    let hits = 0;
+    if (continued) {
+      for (const hap of haps) {
+        if (!hap.hasTag(id)) continue;
+        const onset = Number(hap.whole?.begin);
+        if (Number.isFinite(onset) && onset > previousTime && onset <= cycleTime) hits++;
+      }
+      energy *= Math.exp(-(cycleTime - previousTime) * 1.6);
+    }
+    previousTime = cycleTime;
+    energy = Math.min(1, energy + hits * 0.3);
+
+    const swing = w * 0.42 * (0.25 + 0.75 * energy);
+    const cx = w / 2;
+    const top = h * 0.08;
+    const spacing = (h * 0.86) / (count - 1);
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, top);
+    ctx.lineTo(cx, top + spacing * (count - 1));
+    ctx.stroke();
+
+    const phase = (cycleTime / span) * Math.PI * 2;
+    const positions = [];
+    for (let k = 0; k < count; k++) {
+      positions.push(cx + swing * Math.cos(phase * (base + k)));
+    }
+
+    // The wave the column is currently weaving
+    const color = haps.find(hap => hap.hasTag(id) && hap.isActive(time))?.value?.color;
+    ctx.strokeStyle = color || 'rgba(160, 210, 255, 0.5)';
+    ctx.globalAlpha = color ? 0.5 : 1;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let k = 0; k < count; k++) {
+      const y = top + spacing * k;
+      k === 0 ? ctx.moveTo(positions[k], y) : ctx.lineTo(positions[k], y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    for (let k = 0; k < count; k++) {
+      const y = top + spacing * k;
+      const speed = Math.abs(Math.sin(phase * (base + k)));
+      ctx.fillStyle = `rgba(255, 255, 255, ${0.35 + 0.55 * speed})`;
+      ctx.beginPath();
+      ctx.arc(positions[k], y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+});
+
+/* ── Widget 12: _resonance — Interval Orbit Envelopes ──── */
+// Each sounding note orbits the same circle at a rate proportional to its
+// true frequency. Chords are drawn between the notes each frame and left
+// to fade, so the envelope of an interval accumulates: an octave sweeps a
+// cardioid, a fifth its own curve. The figure IS the frequency ratio.
+registerWidget('_resonance', (id, options = {}, pat) => {
+  const size = options.size || 200;
+  options = { width: size, height: size, ...options };
+  const canvas = getCanvasWidget(id, options, '_resonance');
+  const ctx = canvas.getContext('2d');
+  const shouldPaint = createPaintGate(canvas, options.fps || 30);
+  let previousTime = null;
+
+  return pat.tag(id).onPaint((_, time, haps) => {
+    if (!shouldPaint()) return;
+    const w = canvas.width, h = canvas.height;
+
+    // Fade instead of clear: the persistence IS the envelope.
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.02)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.globalCompositeOperation = 'source-over';
+
+    const cx = w / 2, cy = h / 2;
+    const radius = Math.min(w, h) * 0.44;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const cycleTime = Number(time);
+    const continued = previousTime !== null && cycleTime > previousTime && cycleTime - previousTime < 0.25;
+    const startTime = continued ? previousTime : cycleTime;
+    previousTime = cycleTime;
+
+    const active = haps.filter(hap => hap.hasTag(id) && hap.isActive(time));
+    const freqs = [];
+    for (const hap of active) {
+      if (freqs.length >= 4) break;
+      try { freqs.push(getFrequency(hap)); } catch (_) {}
+    }
+    if (!freqs.length) return;
+    freqs.sort((a, b) => a - b);
+    const fmin = freqs[0];
+
+    // Lowest note: one revolution per cycle; everything else orbits at its
+    // exact ratio above that. Sub-steps between frames keep the art dense.
+    const pointsAt = (t) => freqs.map((freq) => {
+      const angle = Math.PI * 2 * (freq / fmin) * t - Math.PI / 2;
+      return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle), freq };
+    });
+
+    const steps = continued ? 4 : 1;
+    ctx.lineWidth = 1;
+    for (let s = 1; s <= steps; s++) {
+      const points = pointsAt(startTime + (cycleTime - startTime) * (s / steps));
+      if (points.length === 1) {
+        ctx.strokeStyle = 'hsla(320, 90%, 70%, 0.2)';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(points[0].x, points[0].y);
+        ctx.stroke();
+        continue;
+      }
+      for (let i = 0; i < points.length - 1; i++) {
+        for (let j = i + 1; j < points.length; j++) {
+          // Hue from the interval class, so the figure names the interval:
+          // octaves and unisons share a colour, a fifth has its own.
+          const hue = ((Math.log2(points[j].freq / points[i].freq) % 1) * 360 + 360) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 85%, 66%, 0.3)`;
+          ctx.beginPath();
+          ctx.moveTo(points[i].x, points[i].y);
+          ctx.lineTo(points[j].x, points[j].y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.beginPath();
+    for (const point of pointsAt(cycleTime)) {
+      ctx.moveTo(point.x + 3, point.y);
+      ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  });
+});
