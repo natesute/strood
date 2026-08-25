@@ -14,7 +14,6 @@ const FONT_SIZE = 12;
 const FONT_STACK = '"Fragment Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
 const FRAME_INTERVAL = 40;
 const MAX_SPRITES = 4096;
-const PARALLAX = 0.07;
 const DENSITY_FREQ = 0.048;
 const DRIFT_SPEED = 0.045;
 const EVOLVE_SPEED = 0.012;
@@ -183,6 +182,8 @@ export function createGraphBackground({ viewport }) {
   let dpr = 1;
   let cameraX = 0;
   let cameraY = 0;
+  let cameraScale = 1;
+  let cameraDirty = false;
   let audioTarget = 0;
   let audioSmooth = 0;
 
@@ -225,21 +226,20 @@ export function createGraphBackground({ viewport }) {
     const aspect = CELL_H / CELL_W;
     const drift = clock * (DRIFT_SPEED / DENSITY_FREQ);
     const evolve = clock * EVOLVE_SPEED;
-    const parallaxX = -cameraX * PARALLAX / CELL_W;
-    const parallaxY = -cameraY * PARALLAX / CELL_H;
+    const invScale = 1 / cameraScale;
+    const originX = -cameraX / CELL_W;
+    const originY = -cameraY / CELL_H;
     const threshold = 0.47 - audioSmooth * 0.03;
     const glow = audioSmooth * 6;
 
     for (let row = 0; row < rows; row++) {
-      const profile = smoothstep(0.06, 0.52, (row + 0.5) / rows);
-      if (profile * 1.4 < threshold) continue;
-      const sampleY = (row + parallaxY) * DENSITY_FREQ * aspect;
+      const sampleY = (row + originY) * invScale * DENSITY_FREQ * aspect;
       for (let column = 0; column < columns; column++) {
-        const sampleX = (column + parallaxX + drift) * DENSITY_FREQ;
+        const sampleX = ((column + originX) * invScale + drift) * DENSITY_FREQ;
         const coverNoise = fbm3(sampleX * 0.32 + 37.2, sampleY * 0.32, evolve * 0.7, 1);
-        const cover = smoothstep(0.35, 0.65, coverNoise);
+        const cover = smoothstep(0.4, 0.68, coverNoise);
         const shape = fbm3(sampleX, sampleY, evolve, 3);
-        const density = shape * (0.15 + 1.2 * cover) * profile;
+        const density = shape * (0.15 + 1.2 * cover);
         if (density <= threshold) continue;
         const amount = smoothstep(threshold, threshold + 0.16, density);
         const level = Math.min(RAMP.length, 1 + Math.floor(amount * RAMP.length));
@@ -275,7 +275,8 @@ export function createGraphBackground({ viewport }) {
     rafId = 0;
     if (!shouldAnimate()) return;
     rafId = requestAnimationFrame(frame);
-    if (now - lastFrame < FRAME_INTERVAL) return;
+    if (now - lastFrame < FRAME_INTERVAL && !cameraDirty) return;
+    cameraDirty = false;
     const delta = Math.min(0.25, Math.max(0, (now - lastFrame) / 1000));
     lastFrame = now;
     audioSmooth += (audioTarget - audioSmooth) * Math.min(1, delta * 3);
@@ -340,9 +341,12 @@ export function createGraphBackground({ viewport }) {
       active = Boolean(next);
       if (active) start();
     },
-    setCamera(x, y) {
+    setCamera(x, y, scale = 1) {
+      if (x === cameraX && y === cameraY && scale === cameraScale) return;
       cameraX = x;
       cameraY = y;
+      cameraScale = scale || 1;
+      cameraDirty = true;
     },
     destroy() {
       if (rafId) cancelAnimationFrame(rafId);

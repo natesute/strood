@@ -696,7 +696,7 @@ export function createGraphViewController({
       ? `translate3d(${displayX}px, ${displayY}px, 0) scale(${surfaceScale})`
       : `translate(${displayX}px, ${displayY}px) scale(${surfaceScale})`;
     root.dataset.graphScale = surfaceScale.toFixed(3);
-    background.setCamera(cameraX, cameraY);
+    background.setCamera(cameraX, cameraY, surfaceScale);
   }
 
   function settleGraphCamera() {
