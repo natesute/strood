@@ -16,18 +16,18 @@ const FRAME_INTERVAL = 40;
 const MAX_SPRITES = 4096;
 const PARALLAX = 0.07;
 const DENSITY_FREQ = 0.048;
-const DRIFT_SPEED = 0.016;
-const EVOLVE_SPEED = 0.045;
-const CHARS = [' ', '.', ':', '+', 'x', 'X', 'v', 'V', '6', '0', '8', '#', '@'];
+const DRIFT_SPEED = 0.05;
+const EVOLVE_SPEED = 0.095;
+const CHARS = [' ', '.', ':', '+', '*', '=', '%', '&', '#', '@'];
 const RAMP = [
   [1, 1, 2],
-  [2, 4, 3],
-  [4, 4, 5],
-  [5, 8, 6],
-  [8, 7, 9],
-  [9, 10, 5],
-  [10, 11, 7],
-  [11, 12, 10],
+  [2, 2, 3],
+  [3, 4, 3],
+  [4, 5, 4],
+  [5, 6, 5],
+  [6, 8, 7],
+  [8, 9, 6],
+  [9, 8, 9],
 ];
 
 export const BACKGROUND_MODES = [
@@ -186,12 +186,8 @@ export function createGraphBackground({ viewport }) {
   let audioTarget = 0;
   let audioSmooth = 0;
 
-  const reducedMotion = typeof matchMedia === 'function'
-    ? matchMedia('(prefers-reduced-motion: reduce)')
-    : null;
-
   function shouldAnimate() {
-    return active && mode.id !== 'off' && !document.hidden && !reducedMotion?.matches;
+    return active && mode.id !== 'off' && !document.hidden;
   }
 
   function sprite(charIndex, hue, sat, light) {
