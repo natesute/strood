@@ -61,14 +61,22 @@ export function ensureMasterEngine() {
 }
 
 export function silenceMasterEngine() {
-  if (engine) {
-    const now = engine.context.currentTime;
-    engine.masterGain.gain.cancelScheduledValues(now);
-    engine.masterGain.gain.setValueAtTime(0, now);
+  if (!engine) {
+    resetGlobalEffects();
+    return ensureMasterEngine();
   }
-  resetGlobalEffects();
-  engine = null;
-  return ensureMasterEngine();
+  const gain = engine.masterGain.gain;
+  const now = engine.context.currentTime;
+  gain.cancelScheduledValues(now);
+  gain.setValueAtTime(gain.value, now);
+  gain.linearRampToValueAtTime(0, now + 0.015);
+  // Let the ramp finish before superdough swaps destinationGain; the swap makes
+  // ensureMasterEngine's source check fail, which disconnects the old chain.
+  setTimeout(() => {
+    resetGlobalEffects();
+    ensureMasterEngine();
+  }, 20);
+  return engine;
 }
 
 export function setOrbitAudibility(orbit, audible, rampSeconds = 0.01) {
