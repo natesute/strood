@@ -103,8 +103,11 @@ function updateHistoryButtons() {
   if (undo) undo.disabled = undoStack.length < 2;
   if (redo) redo.disabled = redoStack.length === 0;
 }
+let patchLoadSerial = 0;
+let patchEditSerial = 0;
 function commitPatch() {
   if (!patchDef || !currentPatchName) return;
+  patchEditSerial += 1;
   setPatchDirty(true);
   clearTimeout(commitTimeout);
   clearTimeout(historyTimeout);
@@ -1125,8 +1128,10 @@ async function loadPatch(name) {
     if (select) select.value = currentPatchName;
     return;
   }
+  const loadToken = ++patchLoadSerial;
   try {
     const data = await readPatch(name);
+    if (loadToken !== patchLoadSerial) return;
     patchDef = data;
     currentPatchName = name;
     announcePatchFocus(false);
@@ -1142,22 +1147,34 @@ async function loadPatch(name) {
 }
 
 async function savePatch() {
-  if (!patchDef || !currentPatchName) return;
+  if (!patchDef || !currentPatchName) return false;
+  const savedName = currentPatchName;
+  const editsAtSave = patchEditSerial;
   try {
-    await writePatch(currentPatchName, patchDef);
-    setPatchDirty(false);
-    showToast(`Saved patch ${currentPatchName}`);
+    await writePatch(savedName, patchDef);
+    // Edits or a patch switch during the request mean this response no longer
+    // describes the editor's state — leave the dirty flag alone.
+    if (currentPatchName === savedName && patchEditSerial === editsAtSave) setPatchDirty(false);
+    showToast(`Saved patch ${savedName}`);
+    return true;
   } catch (error) {
-    setPatchDirty(true);
+    if (currentPatchName === savedName) setPatchDirty(true);
     showToast(`Patch save failed: ${error.message}`);
+    return false;
   }
 }
 
 async function saveAsPatch() {
   const name = await promptDialog({ title: 'Save patch as', label: 'Patch name', confirmLabel: 'Save' });
   if (!name) return;
+  const previousName = currentPatchName;
+  const previousDefName = patchDef.name;
   patchDef.name = name; currentPatchName = name;
-  await savePatch();
+  if (!(await savePatch())) {
+    patchDef.name = previousDefName;
+    currentPatchName = previousName;
+    return;
+  }
   registerPatch(name, patchDef);
   const sel = overlayEl?.querySelector('.pe-select');
   if (sel) loadPatchList(sel);

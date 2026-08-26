@@ -33,6 +33,16 @@ describe('performance metadata', () => {
     expect(sectionAtCycle(sections, 9).name).toBe('Intro');
   });
 
+  it('accepts arrangement entries with the keys in either order', () => {
+    expect(parseSections(`const arrangement = [
+      { cycles: 4, section: 'Intro' },
+      { section: 'Hook', cycles: 4 },
+    ]`)).toEqual([
+      { name: 'Intro', start: 0, end: 4 },
+      { name: 'Hook', start: 4, end: 8 },
+    ]);
+  });
+
   it('still opens songs that use legacy section comments', () => {
     expect(parseSections('// @section Intro | 0-4')).toEqual([
       { name: 'Intro', start: 0, end: 4 },

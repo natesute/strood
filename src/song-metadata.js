@@ -1,5 +1,5 @@
 const ARRANGEMENT_BLOCK = /\bconst\s+arrangement\s*=\s*\[([\s\S]*?)\]/m;
-const ARRANGEMENT_ENTRY = /\{\s*section\s*:\s*(['"])(.*?)\1\s*,\s*cycles\s*:\s*(\d+(?:\.\d+)?)\s*,?\s*\}/g;
+const ARRANGEMENT_ENTRY = /\{\s*(?:section\s*:\s*(['"])(.*?)\1\s*,\s*cycles\s*:\s*(\d+(?:\.\d+)?)|cycles\s*:\s*(\d+(?:\.\d+)?)\s*,\s*section\s*:\s*(['"])(.*?)\5)\s*,?\s*\}/g;
 const LEGACY_SECTION_PATTERN = /^\s*\/\/\s*@section\s+([^|]+?)\s*\|\s*(\d+)\s*-\s*(\d+)\s*$/i;
 const SONG_PART = /\bconst\s+songPart\s*=\s*(['"])(.*?)\1/;
 
@@ -7,9 +7,9 @@ export function parseSections(code) {
   const block = code.match(ARRANGEMENT_BLOCK)?.[1] || '';
   let cursor = 0;
   const arrangement = [...block.matchAll(ARRANGEMENT_ENTRY)].flatMap((match) => {
-    const cycles = Number(match[3]);
+    const cycles = Number(match[3] ?? match[4]);
     if (!Number.isFinite(cycles) || cycles <= 0) return [];
-    const section = { name: match[2].trim(), start: cursor, end: cursor + cycles };
+    const section = { name: (match[2] ?? match[6]).trim(), start: cursor, end: cursor + cycles };
     cursor = section.end;
     return [section];
   });

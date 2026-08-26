@@ -10,18 +10,21 @@ function configureCompressor(node, settings) {
   for (const [name, value] of Object.entries(settings)) node[name].value = value;
 }
 
+function disconnectEngine() {
+  if (!engine) return;
+  try { engine.masterGain.disconnect(); } catch {}
+  try { engine.compressor.disconnect(); } catch {}
+  try { engine.limiter.disconnect(); } catch {}
+  try { engine.analyser.disconnect(); } catch {}
+}
+
 export function ensureMasterEngine() {
   const context = getAudioContext();
   const controller = getSuperdoughAudioController();
   const source = controller.output.destinationGain;
   if (engine?.source === source) return engine;
 
-  if (engine) {
-    try { engine.masterGain.disconnect(); } catch {}
-    try { engine.compressor.disconnect(); } catch {}
-    try { engine.limiter.disconnect(); } catch {}
-    try { engine.analyser.disconnect(); } catch {}
-  }
+  disconnectEngine();
 
   source.disconnect();
   const masterGain = context.createGain();
@@ -66,6 +69,7 @@ export function silenceMasterEngine() {
     engine.masterGain.gain.cancelScheduledValues(now);
     engine.masterGain.gain.setValueAtTime(0, now);
   }
+  disconnectEngine();
   resetGlobalEffects();
   engine = null;
   return ensureMasterEngine();

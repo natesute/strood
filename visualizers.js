@@ -72,6 +72,8 @@ function createPaintGate(canvas, fps = 24) {
 function getCanvasWidget(id, options = {}, method = '') {
   const { width = 500, height = 60, pixelRatio = DEFAULT_PIXEL_RATIO } = options;
   let canvas = document.getElementById(id) || document.createElement('canvas');
+  const previous = visualizerRegistry.get(id);
+  if (previous?.canvas && previous.canvas !== canvas) canvasObserver?.unobserve(previous.canvas);
   canvas.style.width = width + 'px';
   canvas.style.height = height + 'px';
   setWidget(id, canvas);
