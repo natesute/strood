@@ -2,6 +2,7 @@ import { parseTracks } from './tracks.js';
 
 export const VISUALIZER_METHODS = [
   { method: '_scope', label: 'Waveform', call: '._scope({ width: 520, height: 112, autoScale: true })' },
+  { method: '_spiral', label: 'Spiral', call: '._spiral({ size: 200 })' },
   { method: '_helix', label: 'Helix', call: '._helix({ size: 190, turns: 4 })' },
   { method: '_harmonics', label: 'Harmonics', call: '._harmonics({ width: 520, height: 104 })' },
   { method: '_lissajous', label: 'Lissajous', call: '._lissajous({ size: 180 })' },
@@ -36,6 +37,43 @@ const IDENTIFIER = /[A-Za-z_$][A-Za-z0-9_$]*/g;
 const CONST_START = /(^|\n)([ \t]*const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=)/g;
 const CONTINUATION = /^(?:\.|\?|:|\)|\]|\}|,|\+|-|\*|\/|&&|\|\|)/;
 
+function commentRanges(code) {
+  const ranges = [];
+  let quote = '';
+  let escaped = false;
+  for (let cursor = 0; cursor < code.length; cursor++) {
+    const char = code[cursor];
+    const next = code[cursor + 1];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      const end = code.indexOf('\n', cursor);
+      ranges.push([cursor, end === -1 ? code.length : end]);
+      cursor = end === -1 ? code.length : end;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const close = code.indexOf('*/', cursor + 2);
+      const end = close === -1 ? code.length : close + 2;
+      ranges.push([cursor, end]);
+      cursor = end - 1;
+    }
+  }
+  return ranges;
+}
+
+function inComment(ranges, index) {
+  return ranges.some(([from, to]) => index >= from && index < to);
+}
+
 function lineEnd(code, from) {
   const index = code.indexOf('\n', from);
   return index === -1 ? code.length : index;
@@ -48,6 +86,26 @@ function nextNonBlankLine(code, from) {
     const text = code.slice(cursor, end).trim();
     if (text) return { text, from: cursor, end };
     cursor = end + 1;
+  }
+  return null;
+}
+
+function nextCodeLine(code, from) {
+  let cursor = from;
+  while (cursor < code.length) {
+    const line = nextNonBlankLine(code, cursor);
+    if (!line) return null;
+    if (line.text.startsWith('//')) {
+      cursor = line.end + 1;
+      continue;
+    }
+    if (line.text.startsWith('/*')) {
+      const close = code.indexOf('*/', line.from + 2);
+      if (close === -1) return null;
+      cursor = close + 2;
+      continue;
+    }
+    return line;
   }
   return null;
 }
@@ -104,9 +162,10 @@ function declarationEnd(code, expressionStart) {
 
     if (char !== '\n' || round || square || curly) continue;
     const previous = code.slice(expressionStart, cursor).trimEnd();
-    const following = nextNonBlankLine(code, cursor + 1);
+    // Look past comment lines so a chain that resumes after `// note` still
+    // belongs to this declaration.
+    const following = nextCodeLine(code, cursor + 1);
     if (!following) return cursor;
-    if (following.text.startsWith('//') || following.text.startsWith('/*')) return cursor;
     if (CONTINUATION.test(following.text)) continue;
     if (/[=>([{,:+\-*/]$/.test(previous)) continue;
     return cursor;
@@ -116,8 +175,10 @@ function declarationEnd(code, expressionStart) {
 
 export function parseDeclarations(code) {
   const declarations = [];
+  const comments = commentRanges(code);
   for (const match of code.matchAll(CONST_START)) {
     const from = match.index + match[1].length;
+    if (inComment(comments, from)) continue;
     const expressionStart = from + match[2].length;
     const to = declarationEnd(code, expressionStart);
     declarations.push({
@@ -141,12 +202,36 @@ function matchingParen(code, open) {
   let depth = 0;
   let quote = '';
   let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
   for (let cursor = open; cursor < code.length; cursor++) {
     const char = code[cursor];
+    const next = code[cursor + 1];
+    if (lineComment) {
+      if (char === '\n') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (char === '*' && next === '/') {
+        blockComment = false;
+        cursor++;
+      }
+      continue;
+    }
     if (quote) {
       if (escaped) escaped = false;
       else if (char === '\\') escaped = true;
       else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      lineComment = true;
+      cursor++;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      blockComment = true;
+      cursor++;
       continue;
     }
     if (char === '"' || char === "'" || char === '`') {
@@ -161,9 +246,11 @@ function matchingParen(code, open) {
 
 export function findVisualizerCalls(code, declarations = parseDeclarations(code)) {
   const calls = [];
+  const comments = commentRanges(code);
   const matcher = /\.(_[A-Za-z][A-Za-z0-9_]*)\s*\(/g;
   for (const match of code.matchAll(matcher)) {
     const from = match.index;
+    if (inComment(comments, from)) continue;
     const to = matchingParen(code, code.indexOf('(', from));
     const declaration = declarations.find((item) => from >= item.from && to <= item.to);
     calls.push({
@@ -185,6 +272,28 @@ function primaryDeclarationName(code, track) {
   if (wrapped) return wrapped[2];
   const direct = block.match(/^\s*(?:[A-Za-z_$][A-Za-z0-9_$]*\$|\$):\s*([A-Za-z_$][A-Za-z0-9_$]*)/);
   return direct?.[1] || null;
+}
+
+function trackRouteDeclaration(code, track, declarationNames) {
+  const block = code.slice(track.start, track.end);
+  const assignment = block.match(/^\s*((?:[A-Za-z_$][A-Za-z0-9_$]*\$)|\$)\s*:\s*/);
+  if (!assignment) return null;
+  const expressionStart = track.start + assignment[0].length;
+  const to = declarationEnd(code, expressionStart);
+  const sourceName = assignment[1] === '$' ? `${track.key}$` : assignment[1];
+  const text = code.slice(track.start, to).trimEnd();
+  const dependencies = [...text.matchAll(IDENTIFIER)]
+    .map(([name]) => name)
+    .filter((name, index, list) => declarationNames.has(name) && list.indexOf(name) === index);
+  return {
+    id: `track:${track.key}`,
+    name: sourceName,
+    from: track.start,
+    to,
+    text,
+    dependencies,
+    sourceType: 'track',
+  };
 }
 
 function trackMixDeclaration(code, track, byName) {
@@ -229,9 +338,11 @@ function patternRole(declaration) {
 
 export function findArrangementEntries(source) {
   const entries = [];
+  const comments = commentRanges(source);
   const matcher = /\barrange\s*\(/g;
   let lane = 0;
   for (const match of source.matchAll(matcher)) {
+    if (inComment(comments, match.index)) continue;
     const open = source.indexOf('(', match.index);
     const close = matchingParen(source, open);
     const bodyStart = open + 1;
@@ -242,12 +353,36 @@ export function findArrangementEntries(source) {
     let escaped = false;
     let round = 0;
     let curly = 0;
+    let lineComment = false;
+    let blockComment = false;
     for (let index = 0; index < body.length; index += 1) {
       const char = body[index];
+      const next = body[index + 1];
+      if (lineComment) {
+        if (char === '\n') lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (char === '*' && next === '/') {
+          blockComment = false;
+          index += 1;
+        }
+        continue;
+      }
       if (quote) {
         if (escaped) escaped = false;
         else if (char === '\\') escaped = true;
         else if (char === quote) quote = '';
+        continue;
+      }
+      if (char === '/' && next === '/') {
+        lineComment = true;
+        index += 1;
+        continue;
+      }
+      if (char === '/' && next === '*') {
+        blockComment = true;
+        index += 1;
         continue;
       }
       if (char === '"' || char === "'" || char === '`') {
@@ -263,16 +398,36 @@ export function findArrangementEntries(source) {
       let depth = 1;
       let innerQuote = '';
       let innerEscaped = false;
+      let innerLineComment = false;
+      let innerBlockComment = false;
       let end = index + 1;
       for (; end < body.length && depth; end += 1) {
         const inner = body[end];
+        const innerNext = body[end + 1];
+        if (innerLineComment) {
+          if (inner === '\n') innerLineComment = false;
+          continue;
+        }
+        if (innerBlockComment) {
+          if (inner === '*' && innerNext === '/') {
+            innerBlockComment = false;
+            end += 1;
+          }
+          continue;
+        }
         if (innerQuote) {
           if (innerEscaped) innerEscaped = false;
           else if (inner === '\\') innerEscaped = true;
           else if (inner === innerQuote) innerQuote = '';
           continue;
         }
-        if (inner === '"' || inner === "'" || inner === '`') innerQuote = inner;
+        if (inner === '/' && innerNext === '/') {
+          innerLineComment = true;
+          end += 1;
+        } else if (inner === '/' && innerNext === '*') {
+          innerBlockComment = true;
+          end += 1;
+        } else if (inner === '"' || inner === "'" || inner === '`') innerQuote = inner;
         else if (inner === '[') depth += 1;
         else if (inner === ']') depth -= 1;
       }
@@ -281,10 +436,15 @@ export function findArrangementEntries(source) {
       const duration = Number(entry?.[1]);
       if (!Number.isFinite(duration) || duration <= 0) continue;
       const dependency = entry[2].trim().match(/^([A-Za-z_$][A-Za-z0-9_$]*)$/)?.[1] || null;
+      const compactHead = text.match(/^\[\s*\d+(?:\.\d+)?\s*,\s*[A-Za-z_$][A-Za-z0-9_$]*/)?.[0];
       laneEntries.push({
         lane,
         from: bodyStart + index,
         to: bodyStart + end,
+        highlightFrom: bodyStart + index,
+        highlightTo: dependency
+          ? bodyStart + end
+          : bodyStart + index + Math.max(1, compactHead?.length || 1),
         start: cursor,
         end: cursor + duration,
         dependency,
@@ -299,23 +459,42 @@ export function findArrangementEntries(source) {
 }
 
 export function buildSongGraph(code) {
-  const declarations = parseDeclarations(code);
-  const byName = new Map(declarations.map((item) => [item.name, item]));
-  const visualizers = findVisualizerCalls(code, declarations);
+  const constDeclarations = parseDeclarations(code);
+  const byName = new Map(constDeclarations.map((item) => [item.name, item]));
+  const declarationNames = new Set(byName.keys());
   const soloKey = code.match(/\bconst\s+solo\s*=\s*(['"])([A-Za-z0-9_-]+)\1/)?.[2] || null;
   const tracks = parseTracks(code).map((track) => {
     const primary = primaryDeclarationName(code, track);
     const reachable = reachableDeclarations(primary, byName);
     const mixDeclaration = trackMixDeclaration(code, track, byName);
+    const primaryDeclaration = byName.get(primary) || null;
+    const primaryArrangementEntries = primaryDeclaration
+      ? findArrangementEntries(primaryDeclaration.text)
+      : [];
+    const routeDeclaration = trackRouteDeclaration(code, track, declarationNames);
+    const separatesArrangement = Boolean(routeDeclaration && primaryArrangementEntries.length);
     return {
       ...track,
       primary,
-      declaration: byName.get(primary) || null,
-      notes: reachable.filter((item) => isNotesDeclaration(item, primary)),
+      primaryDeclaration,
+      routeDeclaration,
+      separatesArrangement,
+      declaration: separatesArrangement ? routeDeclaration : primaryDeclaration,
+      notes: [
+        ...(separatesArrangement ? [primaryDeclaration] : []),
+        ...reachable.filter((item) => isNotesDeclaration(item, primary)),
+      ],
       mixDeclaration,
       muted: mixDeclaration?.text.match(/\bmute\s*:\s*(true|false)\b/)?.[1] === 'true',
     };
   });
+  const declarations = [
+    ...constDeclarations,
+    ...tracks
+      .filter(({ separatesArrangement }) => separatesArrangement)
+      .map(({ routeDeclaration }) => routeDeclaration),
+  ];
+  const visualizers = findVisualizerCalls(code, declarations);
 
   for (const visualizer of visualizers) {
     if (visualizer.target) continue;
@@ -323,12 +502,24 @@ export function buildSongGraph(code) {
     if (owner?.primary) visualizer.target = owner.primary;
   }
 
+  for (const visualizer of visualizers) {
+    visualizer.sourceTarget = visualizer.target;
+    const owner = tracks.find((track) => (
+      track.declaration?.name === visualizer.target
+      || track.primary === visualizer.target
+      || track.notes.some(({ name }) => name === visualizer.target)
+    ));
+    if (!owner?.declaration) continue;
+    visualizer.target = owner.declaration.name;
+    visualizer.trackKey = owner.key;
+  }
+
   // Source-order IDs made every later visualiser look like a different node
   // whenever a new call was inserted earlier in the song. Scope identity to
   // the connected declaration and method so unrelated node layouts stay put.
   const visualizerCounts = new Map();
   for (const visualizer of visualizers) {
-    const key = `${visualizer.target || 'unattached'}:${visualizer.method}`;
+    const key = `${visualizer.sourceTarget || visualizer.target || 'unattached'}:${visualizer.method}`;
     const index = visualizerCounts.get(key) || 0;
     visualizerCounts.set(key, index + 1);
     visualizer.id = `visualizer:${key}:${index}`;
@@ -337,10 +528,12 @@ export function buildSongGraph(code) {
   const codeNodes = new Map();
   for (const track of tracks) {
     if (track.declaration) {
+      const arrangementEntries = findArrangementEntries(track.declaration.text);
       codeNodes.set(track.declaration.name, {
         ...track.declaration,
         kind: 'declaration',
         role: 'track',
+        arrangementEntries,
         trackKey: track.key,
         trackName: track.name,
         color: track.color,
@@ -457,6 +650,69 @@ export function resolveGraphActivity(graph, activations) {
   return { activeNodes, activeEdges, labelsByNode, activeDependenciesByNode };
 }
 
+export function arrangementEntryId(nodeName, entry) {
+  return [
+    nodeName,
+    Number(entry.lane),
+    Number(entry.start),
+    Number(entry.end),
+    entry.dependency || '',
+  ].join(':');
+}
+
+export function resolveArrangementPlayback(graph, cycle, playing = true) {
+  const activeNodes = new Set();
+  const activeEntries = new Set();
+  const activeEdges = new Set();
+  if (!playing) return { activeNodes, activeEntries, activeEdges };
+
+  const nodesByName = new Map(graph.codeNodes.map((node) => [node.name, node]));
+  const edgesFrom = new Map();
+  for (const edge of graph.edges) {
+    if (edge.to.startsWith('visualizer:')) continue;
+    const edges = edgesFrom.get(edge.from) || [];
+    edges.push(edge);
+    edgesFrom.set(edge.from, edges);
+  }
+
+  const activate = (nodeName, localCycle, ancestors = new Set()) => {
+    if (ancestors.has(nodeName)) return;
+    const node = nodesByName.get(nodeName);
+    if (!node) return;
+    activeNodes.add(nodeName);
+    const nextAncestors = new Set(ancestors);
+    nextAncestors.add(nodeName);
+
+    if (!(node.arrangementEntries?.length)) {
+      for (const edge of edgesFrom.get(nodeName) || []) {
+        activate(edge.to, localCycle, nextAncestors);
+      }
+      return;
+    }
+
+    for (const entry of node.arrangementEntries || []) {
+      const length = Number(entry.laneLength);
+      if (!(length > 0)) continue;
+      const position = ((Number(localCycle) % length) + length) % length;
+      if (position < entry.start || position >= entry.end) continue;
+      activeEntries.add(arrangementEntryId(nodeName, entry));
+      if (!entry.dependency) continue;
+      const edge = (edgesFrom.get(nodeName) || [])
+        .find((candidate) => candidate.to === entry.dependency);
+      if (edge) activeEdges.add(edge.id);
+      activate(entry.dependency, position - entry.start, nextAncestors);
+    }
+  };
+
+  for (const track of graph.codeNodes.filter((node) => node.role === 'track')) {
+    if (track.muted) continue;
+    if (graph.soloKey && graph.soloKey !== 'all' && track.trackKey !== graph.soloKey) continue;
+    activate(track.name, Number(cycle) || 0);
+  }
+
+  return { activeNodes, activeEntries, activeEdges };
+}
+
 function callRemovalRange(code, call) {
   const lineFrom = code.lastIndexOf('\n', call.from - 1) + 1;
   const lineToIndex = code.indexOf('\n', call.to);
@@ -467,24 +723,35 @@ function callRemovalRange(code, call) {
   return { from: call.from, to: call.to };
 }
 
+function declarationInsertionPoint(code, declaration) {
+  // Splice chained calls before a trailing semicolon, not after it.
+  const text = code.slice(declaration.from, declaration.to).trimEnd();
+  return text.endsWith(';') ? declaration.from + text.length - 1 : declaration.to;
+}
+
 export function attachVisualizer(code, visualizerId, targetName) {
   const graph = buildSongGraph(code);
   const call = graph.visualizers.find(({ id }) => id === visualizerId);
+  const targetNode = graph.codeNodes.find(({ name, role }) => name === targetName && role === 'track');
   const target = graph.declarations.find(({ name }) => name === targetName);
-  if (!call || !target || call.target === targetName) return code;
+  if (!call || !targetNode || !target || call.target === targetName) return code;
   const removal = callRemovalRange(code, call);
   const without = code.slice(0, removal.from) + code.slice(removal.to);
-  const reparsedTarget = parseDeclarations(without).find(({ name }) => name === targetName);
+  const reparsedTarget = buildSongGraph(without).declarations.find(({ name }) => name === targetName);
   if (!reparsedTarget) return code;
   const separator = '\n  ';
-  return without.slice(0, reparsedTarget.to) + separator + call.text + without.slice(reparsedTarget.to);
+  const at = declarationInsertionPoint(without, reparsedTarget);
+  return without.slice(0, at) + separator + call.text + without.slice(at);
 }
 
 export function addVisualizer(code, method, targetName) {
   const preset = VISUALIZER_METHODS.find((item) => item.method === method);
-  const target = parseDeclarations(code).find(({ name }) => name === targetName);
-  if (!preset || !target) return code;
-  return code.slice(0, target.to) + `\n  ${preset.call}` + code.slice(target.to);
+  const graph = buildSongGraph(code);
+  const targetNode = graph.codeNodes.find(({ name, role }) => name === targetName && role === 'track');
+  const target = graph.declarations.find(({ name }) => name === targetName);
+  if (!preset || !targetNode || !target) return code;
+  const at = declarationInsertionPoint(code, target);
+  return code.slice(0, at) + `\n  ${preset.call}` + code.slice(at);
 }
 
 export function removeVisualizer(code, visualizerId) {

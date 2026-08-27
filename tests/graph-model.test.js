@@ -1,17 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
   addVisualizer,
+  arrangementEntryId,
   attachVisualizer,
   buildSongGraph,
   collectGraphActivityHaps,
   findArrangementEntries,
   parseDeclarations,
   removeVisualizer,
+  resolveArrangementPlayback,
   resolveGraphActivity,
   toggleTrackMute,
   toggleTrackSolo,
 } from '../src/graph-model.js';
-import { automaticLayout } from '../src/graph-view.js';
+import {
+  automaticLayout,
+  graphRectIsVisible,
+  graphViewportBounds,
+  resolveNodeCollisions,
+} from '../src/graph-view.js';
 
 const song = `const notes = note("c4 e4 g4")
 const voice = notes
@@ -33,6 +40,12 @@ const leadVocal = note(vocalNotes).sound(synthName)
 vocal$: track('vocal', leadVocal)
   ._lissajous({ size: 150 })`;
 
+const phraseVisualizerSong = `const notes = note("c4 e4")._scope({ width: 200, height: 80 })
+const voice = notes.sound("square")
+
+// @track lead | Lead
+lead$: track('lead', voice)`;
+
 const mixedSong = `const solo = 'all'
 const leadMix = { gain: .8, mute: false }
 const leadNotes = note("c4 e4")
@@ -41,12 +54,29 @@ const leadVoice = leadNotes.sound("square")
 // @track main-hook | Lead synth
 lead$: track('main-hook', leadVoice, leadMix)`;
 
+const twoTrackSong = `${song}
+
+const bassNotes = note("c2 g2")
+const bassVoice = bassNotes.sound("square")
+
+// @track bass | Bass
+bass$: track('bass', bassVoice)`;
+
 const arrangedSong = `const phrase = note("c4 e4 g4")
 const timeline = arrange([4, phrase], [4, silence], [1, note("c5")])
 const voice = timeline.sound("square")
 
 // @track lead | Lead synth
 lead$: track('lead', voice)`;
+
+const nestedArrangedSong = `const groove = note("c4 e4")
+const fill = note("g4 a4")
+const other = note("d4 f4")
+const nested = arrange([2, groove], [2, fill])
+const timeline = arrange([4, nested], [4, other])
+
+// @track lead | Lead synth
+lead$: track('lead', timeline)`;
 
 const denseSong = [3, 4, 3, 5, 3, 2, 2, 1, 10].map((noteCount, trackIndex) => {
   const noteNames = Array.from({ length: noteCount }, (_, noteIndex) => `notes${trackIndex}_${noteIndex}`);
@@ -99,6 +129,22 @@ describe('source-backed graph model', () => {
     }));
   });
 
+  it('connects visualisers declared on phrases to their owning track node', () => {
+    const graph = buildSongGraph(phraseVisualizerSong);
+    expect(graph.visualizers[0]).toMatchObject({
+      method: '_scope',
+      sourceTarget: 'notes',
+      target: 'voice',
+      trackKey: 'lead',
+    });
+    expect(graph.edges).toContainEqual(expect.objectContaining({
+      from: 'voice',
+      to: graph.visualizers[0].id,
+    }));
+    expect(graph.edges.some(({ from, to }) => from === 'notes' && to === graph.visualizers[0].id))
+      .toBe(false);
+  });
+
   it('keeps complete multiline declaration ranges editable', () => {
     const voice = parseDeclarations(song).find(({ name }) => name === 'voice');
     expect(voice.text).toContain('.sound("sawtooth")');
@@ -128,20 +174,47 @@ describe('source-backed graph model', () => {
         expect.objectContaining({ start: 4, end: 8, dependency: 'silence' }),
         expect.objectContaining({ start: 8, end: 9, dependency: null, laneLength: 9 }),
       ]);
+    const timelineSource = graph.codeNodes.find(({ name }) => name === 'timeline').text;
+    const inlineEntry = findArrangementEntries(timelineSource)[2];
+    expect(timelineSource.slice(inlineEntry.highlightFrom, inlineEntry.highlightTo)).toBe('[1, note');
   });
 
-  it('rewires a visualiser by moving its source method to the selected node', () => {
-    const graph = buildSongGraph(song);
-    const next = attachVisualizer(song, graph.visualizers[0].id, 'notes');
+  it('only activates nested arrangements selected by their parent', () => {
+    const graph = buildSongGraph(nestedArrangedSong);
+    const nested = graph.codeNodes.find(({ name }) => name === 'nested');
+    const timeline = graph.codeNodes.find(({ name }) => name === 'timeline');
+    const track = graph.codeNodes.find(({ name }) => name === 'lead$');
+    const opening = resolveArrangementPlayback(graph, 1, true);
+    expect(track).toMatchObject({ kind: 'declaration', role: 'track', sourceType: 'track' });
+    expect(track.text).toBe("lead$: track('lead', timeline)");
+    expect(timeline.role).toBe('arrangement');
+    expect(graph.edges).toContainEqual(expect.objectContaining({ from: 'lead$', to: 'timeline' }));
+    expect(opening.activeNodes).toEqual(new Set(['lead$', 'timeline', 'nested', 'groove']));
+    expect(opening.activeEntries).toContain(arrangementEntryId('timeline', timeline.arrangementEntries[0]));
+    expect(opening.activeEntries).toContain(arrangementEntryId('nested', nested.arrangementEntries[0]));
+    expect(opening.activeEdges).toContain('edge:nested:groove');
+
+    const later = resolveArrangementPlayback(graph, 5, true);
+    expect(later.activeNodes).toEqual(new Set(['lead$', 'timeline', 'other']));
+    expect(later.activeNodes.has('nested')).toBe(false);
+    expect(later.activeNodes.has('groove')).toBe(false);
+    expect(later.activeEdges.has('edge:nested:groove')).toBe(false);
+  });
+
+  it('rewires a visualiser only between track nodes', () => {
+    const graph = buildSongGraph(twoTrackSong);
+    expect(attachVisualizer(twoTrackSong, graph.visualizers[0].id, 'notes')).toBe(twoTrackSong);
+    const next = attachVisualizer(twoTrackSong, graph.visualizers[0].id, 'bassVoice');
     const moved = buildSongGraph(next).visualizers[0];
-    expect(moved.target).toBe('notes');
+    expect(moved.target).toBe('bassVoice');
     expect(parseDeclarations(next).find(({ name }) => name === 'voice').text).not.toContain('._helix');
-    expect(parseDeclarations(next).find(({ name }) => name === 'notes').text).toContain('._helix');
+    expect(parseDeclarations(next).find(({ name }) => name === 'bassVoice').text).toContain('._helix');
   });
 
-  it('adds a chosen visualiser directly to declaration source', () => {
-    const next = addVisualizer(song, '_orbit', 'notes');
-    expect(parseDeclarations(next).find(({ name }) => name === 'notes').text)
+  it('adds a chosen visualiser only to a track declaration', () => {
+    expect(addVisualizer(song, '_orbit', 'notes')).toBe(song);
+    const next = addVisualizer(song, '_orbit', 'voice');
+    expect(parseDeclarations(next).find(({ name }) => name === 'voice').text)
       .toContain('._orbit({ size: 165 })');
   });
 
@@ -162,7 +235,7 @@ describe('source-backed graph model', () => {
 
   it('keeps existing visualiser identities stable when another is added earlier', () => {
     const before = buildSongGraph(song).visualizers[0];
-    const next = addVisualizer(song, '_orbit', 'notes');
+    const next = addVisualizer(song, '_orbit', 'voice');
     const after = buildSongGraph(next).visualizers.find(({ method }) => method === '_helix');
 
     expect(after.id).toBe(before.id);
@@ -219,5 +292,136 @@ describe('source-backed graph model', () => {
     expect(scale).toBeGreaterThan(.38);
     expect(bounds.width * scale).toBeGreaterThan(viewport.width * .8);
     expect(bounds.height * scale).toBeGreaterThan(viewport.height * .8);
+  });
+
+  it('maps the graph camera to overscanned world bounds for visualiser culling', () => {
+    const bounds = graphViewportBounds({
+      cameraX: -200,
+      cameraY: -100,
+      scale: 2,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      overscan: 140,
+    });
+
+    expect(bounds).toEqual({ left: 30, top: -20, right: 570, bottom: 420 });
+    expect(graphRectIsVisible({ x: 20, y: 10, width: 10, height: 10 }, bounds)).toBe(true);
+    expect(graphRectIsVisible({ x: 570, y: 420, width: 20, height: 20 }, bounds)).toBe(true);
+    expect(graphRectIsVisible({ x: 571, y: 20, width: 20, height: 20 }, bounds)).toBe(false);
+    expect(graphRectIsVisible({ x: 40, y: 421, width: 20, height: 20 }, bounds)).toBe(false);
+    expect(graphRectIsVisible({ x: 10, y: 20, width: 19, height: 20 }, bounds)).toBe(false);
+    expect(graphRectIsVisible({ x: 40, y: -40, width: 20, height: 19 }, bounds)).toBe(false);
+  });
+
+  it('pushes neighbouring nodes away from a dragged node without moving the dragged node', () => {
+    const layout = {
+      dragged: { x: 80, y: 40, width: 120, height: 90 },
+      neighbour: { x: 150, y: 52, width: 120, height: 90 },
+      chained: { x: 260, y: 52, width: 120, height: 90 },
+      lower: { x: 160, y: 132, width: 120, height: 90 },
+    };
+    const resolved = resolveNodeCollisions(layout, { fixedIds: ['dragged'], gap: 10 });
+    const nodes = Object.values(resolved);
+
+    expect(resolved.dragged).toEqual(layout.dragged);
+    for (const node of nodes) {
+      expect(node.x).toBeGreaterThanOrEqual(8);
+      expect(node.y).toBeGreaterThanOrEqual(8);
+    }
+    for (let left = 0; left < nodes.length; left += 1) {
+      for (let right = left + 1; right < nodes.length; right += 1) {
+        const a = nodes[left];
+        const b = nodes[right];
+        const overlaps = a.x < b.x + b.width + 10 && a.x + a.width + 10 > b.x
+          && a.y < b.y + b.height + 10 && a.y + a.height + 10 > b.y;
+        expect(overlaps).toBe(false);
+      }
+    }
+  });
+
+  it('repairs overlapping saved layouts while leaving clear layouts alone', () => {
+    const overlapping = {
+      first: { x: 8, y: 8, width: 100, height: 80 },
+      second: { x: 40, y: 30, width: 100, height: 80 },
+      third: { x: 55, y: 45, width: 100, height: 80 },
+    };
+    const clear = {
+      first: { x: 8, y: 8, width: 100, height: 80 },
+      second: { x: 130, y: 8, width: 100, height: 80 },
+    };
+    const repaired = Object.values(resolveNodeCollisions(overlapping, { gap: 10 }));
+
+    for (let left = 0; left < repaired.length; left += 1) {
+      for (let right = left + 1; right < repaired.length; right += 1) {
+        const a = repaired[left];
+        const b = repaired[right];
+        const overlaps = a.x < b.x + b.width + 10 && a.x + a.width + 10 > b.x
+          && a.y < b.y + b.height + 10 && a.y + a.height + 10 > b.y;
+        expect(overlaps).toBe(false);
+      }
+    }
+    expect(resolveNodeCollisions(clear, { gap: 10 })).toEqual(clear);
+  });
+});
+
+describe('comment-aware source parsing', () => {
+  it('removes only the visualizer call when its options contain an apostrophe comment', () => {
+    const commented = `const voice = sound("bd sd")
+  ._pulse({
+    // don't autoscale
+    size: 120,
+  })
+
+const bass = sound("jvbass");
+`;
+    const graph = buildSongGraph(commented);
+    expect(graph.visualizers).toHaveLength(1);
+    expect(removeVisualizer(commented, graph.visualizers[0].id))
+      .toBe('const voice = sound("bd sd")\n\nconst bass = sound("jvbass");\n');
+  });
+
+  it('ignores declarations inside block comments', () => {
+    const commented = `/*
+const voice = notes.sound("square")
+*/
+const notes = note("c4 e4")`;
+    expect(parseDeclarations(commented).map(({ name }) => name)).toEqual(['notes']);
+  });
+
+  it('keeps a chain that resumes after a comment line inside its declaration', () => {
+    const commented = `const voice = note("c4")
+  // gentle filter
+  .lpf(1200)
+
+const other = note("e4")`;
+    const [voice] = parseDeclarations(commented);
+    expect(voice.text).toContain('.lpf(1200)');
+  });
+
+  it('skips commented-out arrangement entries', () => {
+    const arrangement = `arrange(
+  [4, phrase],
+  // [4, oldFill] retired verse
+  [4, chorus],
+)`;
+    const entries = findArrangementEntries(arrangement);
+    expect(entries.map(({ dependency }) => dependency)).toEqual(['phrase', 'chorus']);
+    expect(entries.map(({ start, end }) => [start, end])).toEqual([[0, 4], [4, 8]]);
+  });
+
+  it('ignores visualizer calls inside comments', () => {
+    const commented = `const voice = note("c4")
+// voice._pulse({ size: 120 })`;
+    expect(buildSongGraph(commented).visualizers).toHaveLength(0);
+  });
+
+  it('splices a new visualizer before a trailing semicolon', () => {
+    const arranged = `const phrase = note("c4 e4 g4")
+const voice = phrase.sound("square");
+
+// @track lead | Lead
+lead$: track('lead', voice)`;
+    const added = addVisualizer(arranged, '_orbit', 'voice');
+    expect(added).toContain('.sound("square")\n  ._orbit({ size: 165 });');
   });
 });
