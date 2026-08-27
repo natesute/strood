@@ -57,6 +57,7 @@ function parseJsonBody(raw) {
   } catch {
     const error = new Error('Request body is not valid JSON');
     error.statusCode = 400;
+    error.code = 'invalid_json';
     throw error;
   }
 }
@@ -248,8 +249,12 @@ function songsApi() {
 
           return sendJson(res, 405, { code: 'method_not_allowed', message: 'Method not allowed' }, { Allow: 'GET, PUT, DELETE' });
         } catch (error) {
-          server.config.logger.error(error.stack || error.message);
-          return sendJson(res, error.statusCode || 500, { code: 'server_error', message: error.message || 'Server error' });
+          const status = error.statusCode || 500;
+          if (status >= 500) server.config.logger.error(error.stack || error.message);
+          return sendJson(res, status, {
+            code: error.code || 'server_error',
+            message: error.message || 'Server error',
+          });
         }
       });
     },
@@ -303,8 +308,12 @@ function patchesApi() {
 
           return sendJson(res, 405, { code: 'method_not_allowed', message: 'Method not allowed' });
         } catch (error) {
-          server.config.logger.error(error.stack || error.message);
-          return sendJson(res, error.statusCode || 500, { code: 'server_error', message: error.message || 'Server error' });
+          const status = error.statusCode || 500;
+          if (status >= 500) server.config.logger.error(error.stack || error.message);
+          return sendJson(res, status, {
+            code: error.code || 'server_error',
+            message: error.message || 'Server error',
+          });
         }
       });
     },
