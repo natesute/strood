@@ -24,7 +24,7 @@ const arrangement = [
 
 // Pick this value from its inline menu while playing.
 // Strood queues the jump for the end of the current section, then carries on from there.
-const songPart = 'Playground break'
+const songPart = 'Opening hook'
 
 // Performance mix
 const master = .25
@@ -56,11 +56,14 @@ const track = (
 const hookClassic = note("[a4 ~ b4 ~ c#5 ~ e5 ~ f#5@2 g#5 f#5 ~ e5 ~ c#5@9 b4@8]")
   .slow(4)
   .clip(1)
+const hookOpeningHold = note("[a4 ~ b4 ~ c#5 ~ e5 ~ f#5@2 g#5 f#5 ~ e5 ~ c#5@17]")
+  .slow(4)
+  .clip(1)
 const hookTurn = note("[a4 ~ b4 ~ c#5 ~ b4 ~ a4@2 b4 a4 ~ f#4 ~ a4@17]")
   .slow(4)
   .clip(1)
 const hookSong = arrange(
-  [8, hookClassic],
+  [4, hookClassic], [4, hookOpeningHold],
   [12, hookClassic], [4, hookTurn],
   [16, silence],
   [12, hookClassic], [4, hookTurn],
@@ -83,6 +86,7 @@ const hookVoice = stack(
   .postgain(.72)
   .release(0)
   ._helix({ size: 190, turns: 4 })
+  ._phase({ size: 200 })
 
 // @track main-hook | Fairground hook
 hook$: track(
@@ -95,16 +99,15 @@ hook$: track(
 // One slice per bar lets section jumps start at the matching place in the stem.
 const vocalBarSlices = [...Array(149).keys()]
   .join(' ')
-// Swap to 'kids_vocals' here to compare with the untouched recording.
-const vocalSource = 'kids_vocals_tuned_lofi'
+const vocalSource = 'kids_vocals'
 const vocals = s(vocalSource)
   .slice(149, mini(vocalBarSlices))
   .slow(149)
   .clip(1)
   .gain(1)
-  ._scope({ width: 520, height: 112, scale: 4.5 })
+  ._scope({ width: 520, height: 112 })
 
-// @track vocal-melody | Hard-tuned lo-fi vocal
+// @track vocal-melody | Original vocal
 vocal$: track(
   'vocal-melody',
   vocals.orbit(9).color("#ff7aa8"),
@@ -140,7 +143,8 @@ const claviVoice = stack(
   .postgain(.55)
   .release(.09)
   .delay(".1:.0625:.18")
-  ._orbit({ size: 150 })
+  ._resonance({ size: 180 })
+  ._spiral({ size: 190, thickness: 4, steady: .96, colorizeInactive: 1, padding: .01, inset: 2, stretch: 1.2 })
 
 // @track pulse-answer | Pulse-wave answer
 clavi$: track(
@@ -182,7 +186,7 @@ const bassVoice = stack(
   .drive(1.7)
   .shape(.34)
   .postgain(.52)
-  ._lissajous({ size: 170 })
+  ._harmonics({ width: 520, height: 120 })
 
 // @track octave-bass | Distorted octave bass
 bass$: track(
@@ -222,6 +226,7 @@ const organVoice = stack(
   .postgain(.52)
   .release(.25)
   ._tonnetz({ size: 240 })
+  ._interference({ size: 200 })
 
 // @track synth-organ | Vibrato organ
 organ$: track(
@@ -281,6 +286,7 @@ const padVoice = padSong
   .room(.62)
   .size(6.5)
   ._lissajous({ size: 190 })
+  ._overtones({ width: 520, height: 120 })
 
 // @track stereo-pad | Saturated stereo pad
 pad$: track(
@@ -358,6 +364,7 @@ const drumsSong = arrange(
 )
   .shape(.18)
   ._orbit({ size: 165 })
+  ._pendulum({ size: 200, count: 13, span: 4 })
 
 // @track drum-machine | Stomp drum machine
 drums$: track(
