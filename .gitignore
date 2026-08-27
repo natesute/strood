@@ -1,6 +1,7 @@
 node_modules/
 dist/
 public/audio/
+public/backgrounds/
 songs/.history/
 songs/.trash/
 playwright-report/

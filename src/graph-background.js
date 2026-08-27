@@ -3,25 +3,37 @@
  *
  * Clouds are a fractal value-noise density field sampled on a character
  * grid; each cell picks a glyph from a density ramp and an iridescent
- * colour, then blits a cached glyph sprite. The field drifts slowly,
- * parallaxes a little with the graph camera and swells gently with the
- * master meter.
+ * colour, then blits a cached glyph sprite. The field drifts slowly and
+ * stays locked to the graph camera. Its motion is independent of
+ * playback and audio level.
  */
 
 const CELL_W = 11;
 const CELL_H = 15;
 const FONT_SIZE = 12;
 const FONT_STACK = '"Fragment Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
-const FRAME_INTERVAL = 40;
-const MAX_SPRITES = 4096;
+export const BACKGROUND_TIMING = Object.freeze({
+  composeInterval: 33,
+  tileInterval: 400,
+  heavyTileInterval: 800,
+});
+const COMPOSE_INTERVAL = BACKGROUND_TIMING.composeInterval;
+const TILE_INTERVAL = BACKGROUND_TIMING.tileInterval;
+export const BACKGROUND_SPRITE_LIMIT = 1536;
 const DENSITY_FREQ = 0.048;
-const WIND_SPEED = 10;
-const EVOLVE_SPEED = 0.012;
+export const CLOUD_DYNAMICS = Object.freeze({
+  windSpeed: 7,
+  windShear: 2.2,
+  verticalLift: 0.0035,
+  evolutionSpeed: 0.01,
+  billowStrength: 0.22,
+});
 const MIN_SCREEN_CELL = 3;
 const SPRITE_OVERSAMPLE = 2;
 const TILE_MARGIN = 0.3;
 const HEAVY_CELLS = 22000;
-const HEAVY_INTERVAL = 120;
+const HEAVY_TILE_INTERVAL = BACKGROUND_TIMING.heavyTileInterval;
+export const CLOUD_OPACITY = 0.8;
 const CHARS = [' ', '.', '·', '∙', '◦', '∘', '•', '○', '◎', '◉', '●'];
 const RAMP = [
   [1, 2, 1],
@@ -77,6 +89,9 @@ export const BACKGROUND_MODES = [
     hueSpread: 150,
     hueDrift: 2,
   },
+  // Image-backed modes draw a static viewport-filling photo: no cloud
+  // simulation, no camera coupling, no animation loop.
+  { id: 'photo', label: 'Photo', image: '/backgrounds/sky.jpg' },
   { id: 'off', label: 'Off' },
 ];
 
@@ -152,6 +167,15 @@ export function createNoise(seed = 11) {
   return { noise3, fbm3 };
 }
 
+export function cloudFlowAt(sampleY, seconds) {
+  const layerSpeed = CLOUD_DYNAMICS.windSpeed
+    + Math.sin(sampleY * 0.55 + 0.7) * CLOUD_DYNAMICS.windShear;
+  return {
+    windPx: seconds * layerSpeed,
+    lift: seconds * CLOUD_DYNAMICS.verticalLift,
+  };
+}
+
 function cellHash(x, y) {
   let hash = (x * 374761393 + y * 668265263) | 0;
   hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
@@ -176,7 +200,15 @@ export function createGraphBackground({ viewport }) {
   const context = canvas.getContext('2d', { alpha: false });
   const tileCanvas = document.createElement('canvas');
   const tileContext = tileCanvas.getContext('2d');
-  const tile = { left: 0, top: 0, width: 0, height: 0, scale: 1, ready: false };
+  const tile = {
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+    scale: 1,
+    generatedAt: 0,
+    ready: false,
+  };
   const { fbm3 } = createNoise();
   const sprites = new Map();
   let tileCells = 0;
@@ -184,7 +216,9 @@ export function createGraphBackground({ viewport }) {
   let mode = BACKGROUND_MODES[0];
   let active = false;
   let rafId = 0;
-  let lastFrame = 0;
+  let lastTick = null;
+  let lastCompose = -Infinity;
+  let lastTile = -Infinity;
   let clock = 0;
   let width = 0;
   let height = 0;
@@ -192,12 +226,13 @@ export function createGraphBackground({ viewport }) {
   let cameraX = 0;
   let cameraY = 0;
   let cameraScale = 1;
-  let cameraDirty = false;
-  let audioTarget = 0;
-  let audioSmooth = 0;
+  let skyGradient = null;
+  let skyGradientHeight = 0;
+  let skyGradientMode = '';
+  let destroyed = false;
 
   function shouldAnimate() {
-    return active && mode.id !== 'off' && !document.hidden;
+    return !destroyed && active && mode.id !== 'off' && !mode.image && !document.hidden;
   }
 
   function sprite(charIndex, hue, sat, light) {
@@ -207,7 +242,9 @@ export function createGraphBackground({ viewport }) {
     const key = ((charIndex * 36 + hueStep) * 16 + satStep) * 32 + lightStep;
     let cached = sprites.get(key);
     if (!cached) {
-      if (sprites.size >= MAX_SPRITES) sprites.clear();
+      if (sprites.size >= BACKGROUND_SPRITE_LIMIT) {
+        sprites.delete(sprites.keys().next().value);
+      }
       cached = document.createElement('canvas');
       cached.width = Math.max(1, Math.round(CELL_W * dpr * SPRITE_OVERSAMPLE));
       cached.height = Math.max(1, Math.round(CELL_H * dpr * SPRITE_OVERSAMPLE));
@@ -253,26 +290,35 @@ export function createGraphBackground({ viewport }) {
     const cellW = CELL_W * lod;
     const cellH = CELL_H * lod;
     const aspect = CELL_H / CELL_W;
-    const evolve = clock * EVOLVE_SPEED;
-    const windPx = clock * WIND_SPEED;
-    const threshold = 0.47 - audioSmooth * 0.03;
-    const glow = audioSmooth * 6;
+    const evolve = clock * CLOUD_DYNAMICS.evolutionSpeed;
+    const threshold = 0.47;
 
-    const gridX0 = Math.floor((tile.left + windPx) / cellW);
-    const gridX1 = Math.ceil((tile.left + tile.width + windPx) / cellW);
     const gridY0 = Math.floor(tile.top / cellH);
     const gridY1 = Math.ceil((tile.top + tile.height) / cellH);
-    tileCells = (gridX1 - gridX0 + 1) * (gridY1 - gridY0 + 1);
+    tileCells = 0;
+    tile.generatedAt = clock;
     tile.ready = true;
 
     for (let row = gridY0; row <= gridY1; row++) {
-      const sampleY = row * lod * DENSITY_FREQ * aspect;
+      const baseSampleY = row * lod * DENSITY_FREQ * aspect;
+      const flow = cloudFlowAt(baseSampleY, clock);
+      const gridX0 = Math.floor((tile.left + flow.windPx) / cellW);
+      const gridX1 = Math.ceil((tile.left + tile.width + flow.windPx) / cellW);
+      tileCells += gridX1 - gridX0 + 1;
       for (let column = gridX0; column <= gridX1; column++) {
-        const sampleX = column * lod * DENSITY_FREQ;
-        const coverNoise = fbm3(sampleX * 0.32 + 37.2, sampleY * 0.32, evolve * 0.7, 1);
+        const baseSampleX = column * lod * DENSITY_FREQ;
+        const billowX = Math.sin(baseSampleY * 0.72 + evolve * 2.4
+          + Math.sin(baseSampleX * 0.19)) * CLOUD_DYNAMICS.billowStrength;
+        const billowY = Math.sin(baseSampleX * 0.58 - evolve * 1.7)
+          * CLOUD_DYNAMICS.billowStrength * 0.55;
+        const sampleX = baseSampleX + billowX;
+        const sampleY = baseSampleY - flow.lift + billowY;
+        const coverNoise = fbm3(sampleX * 0.3 + 37.2, sampleY * 0.3, evolve * 0.22, 1);
         const cover = smoothstep(0.4, 0.68, coverNoise);
         const shape = fbm3(sampleX, sampleY, evolve, 3);
-        const density = shape * (0.15 + 1.2 * cover);
+        const cauliflower = (Math.sin(sampleX * 2.3 + evolve * 3.1)
+          + Math.sin(sampleY * 2.9 - evolve * 2.2)) * 0.012;
+        const density = (shape + cauliflower) * (0.15 + 1.2 * cover);
         if (density <= threshold) continue;
         const amount = smoothstep(threshold, threshold + 0.16, density);
         const level = Math.min(RAMP.length, 1 + Math.floor(amount * RAMP.length));
@@ -291,11 +337,11 @@ export function createGraphBackground({ viewport }) {
         const light = Math.min(
           96,
           mode.fringeLight + (mode.coreLight - mode.fringeLight) * amount
-            + dither + shading + glow * amount,
+            + dither + shading,
         );
         tileContext.drawImage(
           sprite(charIndex, hue, sat, light),
-          column * cellW - windPx,
+          column * cellW - flow.windPx,
           row * cellH,
           cellW,
           cellH,
@@ -307,54 +353,113 @@ export function createGraphBackground({ viewport }) {
   function compose() {
     if (!width || !height || mode.id === 'off') return;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const gradient = context.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, mode.skyTop);
-    gradient.addColorStop(1, mode.skyBottom);
-    context.fillStyle = gradient;
+    if (!skyGradient || skyGradientHeight !== height || skyGradientMode !== mode.id) {
+      skyGradient = context.createLinearGradient(0, 0, 0, height);
+      skyGradient.addColorStop(0, mode.skyTop);
+      skyGradient.addColorStop(1, mode.skyBottom);
+      skyGradientHeight = height;
+      skyGradientMode = mode.id;
+    }
+    context.fillStyle = skyGradient;
     context.fillRect(0, 0, width, height);
     if (!tile.ready) return;
+    const driftSeconds = Math.max(0, clock - tile.generatedAt);
+    const driftX = -driftSeconds * CLOUD_DYNAMICS.windSpeed * cameraScale;
+    context.globalAlpha = CLOUD_OPACITY;
     context.drawImage(
       tileCanvas,
-      tile.left * cameraScale + cameraX,
+      tile.left * cameraScale + cameraX + driftX,
       tile.top * cameraScale + cameraY,
       tile.width * cameraScale,
       tile.height * cameraScale,
     );
+    context.globalAlpha = 1;
   }
 
-  function paint() {
+  let photoImage = null;
+  let photoSource = '';
+
+  function paintPhoto() {
+    if (!width || !height) return;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.fillStyle = '#0b4a9e';
+    context.fillRect(0, 0, width, height);
+    if (!photoImage?.complete || !photoImage.naturalWidth) return;
+    const scale = Math.max(width / photoImage.naturalWidth, height / photoImage.naturalHeight);
+    const drawWidth = photoImage.naturalWidth * scale;
+    const drawHeight = photoImage.naturalHeight * scale;
+    context.drawImage(
+      photoImage,
+      (width - drawWidth) / 2,
+      (height - drawHeight) / 2,
+      drawWidth,
+      drawHeight,
+    );
+  }
+
+  function loadPhoto(source) {
+    if (photoSource === source) return;
+    photoSource = source;
+    photoImage = new Image();
+    photoImage.src = source;
+    photoImage.decode?.().catch(() => {}).finally(() => {
+      if (!destroyed && active && mode.image === source) paintPhoto();
+    });
+  }
+
+  function paint(now = performance.now()) {
+    if (mode.image) {
+      paintPhoto();
+      return;
+    }
     renderTile();
     compose();
+    lastTile = now;
+    lastCompose = now;
+  }
+
+  function tileCoversCamera() {
+    if (!tile.ready || !cameraScale) return false;
+    const driftX = -(clock - tile.generatedAt) * CLOUD_DYNAMICS.windSpeed;
+    const tileLeft = tile.left + driftX;
+    const tileRight = tileLeft + tile.width;
+    const viewportLeft = -cameraX / cameraScale;
+    const viewportTop = -cameraY / cameraScale;
+    const viewportRight = viewportLeft + width / cameraScale;
+    const viewportBottom = viewportTop + height / cameraScale;
+    return viewportLeft >= tileLeft
+      && viewportRight <= tileRight
+      && viewportTop >= tile.top
+      && viewportBottom <= tile.top + tile.height;
   }
 
   function frame(now) {
     rafId = 0;
     if (!shouldAnimate()) return;
     rafId = requestAnimationFrame(frame);
-    const interval = tileCells > HEAVY_CELLS ? HEAVY_INTERVAL : FRAME_INTERVAL;
-    if (now - lastFrame < interval) {
-      if (cameraDirty) {
-        cameraDirty = false;
-        compose();
-      }
-      return;
+    const delta = lastTick == null
+      ? 0
+      : Math.min(0.25, Math.max(0, (now - lastTick) / 1000));
+    lastTick = now;
+    clock += delta;
+    const tileInterval = tileCells > HEAVY_CELLS ? HEAVY_TILE_INTERVAL : TILE_INTERVAL;
+    const tileDue = now - lastTile >= tileInterval || !tileCoversCamera();
+    if (tileDue) {
+      renderTile();
+      lastTile = now;
     }
-    cameraDirty = false;
-    const delta = Math.min(0.25, Math.max(0, (now - lastFrame) / 1000));
-    lastFrame = now;
-    audioSmooth += (audioTarget - audioSmooth) * Math.min(1, delta * 3);
-    clock += delta * (1 + audioSmooth * 0.35);
-    paint();
+    if (tileDue || now - lastCompose >= COMPOSE_INTERVAL) {
+      compose();
+      lastCompose = now;
+    }
   }
 
   function start() {
     if (shouldAnimate()) {
       if (!rafId) {
-        lastFrame = performance.now() - FRAME_INTERVAL;
+        lastTick = performance.now();
         rafId = requestAnimationFrame(frame);
       }
-    } else if (active && mode.id !== 'off') {
-      paint();
     }
   }
 
@@ -369,20 +474,17 @@ export function createGraphBackground({ viewport }) {
     canvas.width = Math.max(1, Math.round(width * nextDpr));
     canvas.height = Math.max(1, Math.round(height * nextDpr));
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    skyGradient = null;
     if (active && mode.id !== 'off') paint();
   }
 
   const resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(viewport);
 
-  const handleMeter = (event) => {
-    const level = Number(event.detail?.level) || 0;
-    audioTarget = Math.min(1, Math.max(0, (level - 0.35) / 0.5));
-  };
   const handleVisibility = () => start();
-  document.addEventListener('strood:master-meter', handleMeter);
   document.addEventListener('visibilitychange', handleVisibility);
   document.fonts?.ready.then(() => {
+    if (destroyed) return;
     sprites.clear();
     if (active && mode.id !== 'off') paint();
   }).catch(() => {});
@@ -396,7 +498,9 @@ export function createGraphBackground({ viewport }) {
       mode = resolveBackgroundMode(id);
       canvas.hidden = mode.id === 'off';
       sprites.clear();
+      skyGradient = null;
       if (mode.id === 'off') return;
+      if (mode.image) loadPhoto(mode.image);
       paint();
       start();
     },
@@ -409,13 +513,23 @@ export function createGraphBackground({ viewport }) {
       cameraX = x;
       cameraY = y;
       cameraScale = scale || 1;
-      cameraDirty = true;
+      if (mode.image) return;
+      if (active && mode.id !== 'off') {
+        const now = performance.now();
+        if (tileCoversCamera()) {
+          compose();
+          lastCompose = now;
+        } else {
+          paint(now);
+        }
+      }
     },
     destroy() {
+      if (destroyed) return;
+      destroyed = true;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = 0;
       resizeObserver.disconnect();
-      document.removeEventListener('strood:master-meter', handleMeter);
       document.removeEventListener('visibilitychange', handleVisibility);
       canvas.remove();
     },
