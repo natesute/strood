@@ -1,0 +1,28 @@
+name: strood
+
+services:
+  strood:
+    image: node:24.5.0-bookworm-slim
+    restart: unless-stopped
+    init: true
+    working_dir: /app
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        current_lock="$$(sha256sum package-lock.json | cut -d ' ' -f 1)"
+        installed_lock="$$(cat node_modules/.strood-lock-hash 2>/dev/null || true)"
+        if [ "$$installed_lock" != "$$current_lock" ]; then
+          npm ci
+          printf '%s\n' "$$current_lock" > node_modules/.strood-lock-hash
+        fi
+        exec npm run dev -- --host 0.0.0.0 --port 5173
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+
+volumes:
+  node_modules:
