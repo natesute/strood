@@ -50,12 +50,15 @@ import {
 } from './src/song-metadata.js';
 import { loadSamplePacks } from './src/sample-loader.js';
 import { choiceDialog, confirmDialog, promptDialog } from './src/dialogs.js';
+import { diffLines } from './src/line-diff.js';
 import { createInlineVisualizerController } from './src/visualizer-modes.js';
 import { createGraphViewController } from './src/graph-view.js';
 import { buildSongGraph, collectGraphActivityHaps } from './src/graph-model.js';
 import { openPatchEditor, prepareOptionalSystems } from './src/optional-systems.js';
 import { describeError, inferErrorLine, showToast, trapFocus } from './src/ui.js';
 import initialSongCode from './songs/ms jackson.strudel?raw';
+
+const DEFAULT_SONG_NAME = 'ms jackson';
 
 const editorsContainer = document.getElementById('editors-container');
 const secondaryEditors = [];
@@ -64,6 +67,10 @@ let lastEvaluatedSongName = null;
 let songCueTimeline = 0;
 let syncingEditors = false;
 let graphController = null;
+// getAllCode's doc-reference cache; declared here because the function is
+// called during module initialisation, before later statements run.
+let cachedAllCodeDoc = null;
+let cachedAllCode = '';
 
 /* ── Live file sync ─────────────────────────────────────── */
 let currentSongName = null;
@@ -71,6 +78,7 @@ let currentSongVersion = null;
 let lastSavedCode = '';
 let documentDirty = false;
 let pendingExternalUpdate = null;
+let startupLoadPromise = null;
 let recoveryTimer = 0;
 let queuedUpdateTimer = 0;
 let queuedTargetCycle = null;
@@ -191,7 +199,7 @@ const secHighlightField = StateField.define({
   provide: (f) => EditorView.decorations.from(f),
 });
 
-/* ── Note onset flash (white outline on first frame) ────── */
+/* ── Playback text highlights ───────────────────────────── */
 const activeHapIds = new Set();
 const onsetTimestamps = new Map(); // uid -> performance.now() when onset detected
 const currentHapIds = new Set();
@@ -267,8 +275,13 @@ const masterPeakEl = document.getElementById('master-peak');
 const limiterStateEl = document.getElementById('limiter-state');
 const queueStatusEl = document.getElementById('queue-status');
 let isPlaying = false;
+let evalGeneration = 0;
 let currentCols = 1;
 let performanceMode = false;
+let meterFrame = 0;
+let masterLevel = -1;
+let masterPeak = -1;
+let limiterLabel = '';
 
 function schedulerCycle() {
   try {
@@ -279,11 +292,33 @@ function schedulerCycle() {
   }
 }
 
+let cachedSectionSource = null;
+let cachedSections = [];
+let cachedSelectionSource = null;
+let cachedSelection = null;
+
+function sectionsFor(source) {
+  if (source !== cachedSectionSource) {
+    cachedSectionSource = source;
+    cachedSections = parseSections(source);
+  }
+  return cachedSections;
+}
+
+function selectionFor(source) {
+  if (source !== cachedSelectionSource) {
+    cachedSelectionSource = source;
+    cachedSelection = selectedSongSection(source);
+  }
+  return cachedSelection;
+}
+
 function graphPerformanceSnapshot() {
-  const source = lastEvalCode || getAllCode();
-  const sections = parseSections(source);
+  const currentCode = getAllCode();
+  const source = lastEvalCode || currentCode;
+  const sections = sectionsFor(source);
   const totalCycles = Math.max(0, ...sections.map(({ end }) => end));
-  const selected = selectedSongSection(getAllCode());
+  const selected = selectionFor(currentCode);
   let cycle = selected?.start || 0;
   if (isPlaying) {
     const elapsed = Math.max(0, schedulerCycle() - playbackSchedulerCycle);
@@ -308,9 +343,10 @@ function syncGraphPerformance() {
   graphController?.setPerformanceState(graphPerformanceSnapshot());
 }
 
-function updateMode() {
+function updateMode(currentCode = null) {
   const audioPaused = isPlaying && (pauseRequested || !audioIsRunning());
-  const playbackDirty = isPlaying && !queuedUpdateTimer && getAllCode() !== lastEvalCode;
+  const playbackDirty = isPlaying && !queuedUpdateTimer
+    && (currentCode ?? getAllCode()) !== lastEvalCode;
   const showPlay = !isPlaying || audioPaused;
   modeEl.textContent = audioPaused ? 'PAUSED' : (isPlaying ? 'PLAYING' : 'STOPPED');
   modeEl.className = isPlaying && !audioPaused ? 'playing' : 'stopped';
@@ -334,13 +370,22 @@ function setSaveState(label, state = '') {
   saveStateEl.hidden = !label;
 }
 
-function updateDocumentState() {
-  const code = getAllCode();
+function updateDocumentState(code = getAllCode()) {
   documentDirty = code !== lastSavedCode;
   songNameEl.textContent = currentSongName || 'Untitled';
   setSaveState(documentDirty ? 'Unsaved' : '', documentDirty ? 'unsaved' : '');
-  updateMode();
+  saveStateEl.disabled = !documentDirty;
+  saveStateEl.title = documentDirty ? 'Review unsaved changes' : '';
+  updateMode(code);
   window.onbeforeunload = documentDirty ? () => true : null;
+  if (!documentDirty && typeof pendingExternalUpdate?.code === 'string') {
+    const update = pendingExternalUpdate;
+    // CodeMirror change listeners must not dispatch another document change
+    // synchronously. Re-check both state and identity after this update ends.
+    queueMicrotask(() => {
+      if (!documentDirty && pendingExternalUpdate === update) applyExternalUpdate(update);
+    });
+  }
 }
 
 function clearDiagnostic() {
@@ -366,6 +411,10 @@ function showDiagnostic(error) {
 }
 
 function updateDirtyCount() {
+  if (!documentDirty) {
+    dirtyCountEl.textContent = '';
+    return;
+  }
   let count = 0;
   try {
     const field = editor.editor.state.field(dirtyLineField, false);
@@ -426,6 +475,7 @@ const editor = new StrudelMirror({
     if (wasPlaying && !isPlaying) silenceMasterEngine();
     if (!isPlaying) pauseRequested = false;
     updateMode();
+    if (wasPlaying !== isPlaying) restartMasterMeter();
   },
   onError: (error) => {
     console.error(error);
@@ -503,7 +553,7 @@ let wrapEnabled = true;
 const documentChangeListener = EditorView.updateListener.of((viewUpdate) => {
   if (!viewUpdate.docChanged) return;
   syncDocumentChanges(editor.editor, viewUpdate.transactions);
-  updateDocumentState();
+  updateDocumentState(viewUpdate.state.doc.toString());
   debouncedSave();
   updateDirtyCount();
   graphController?.scheduleRefresh();
@@ -525,8 +575,20 @@ editor.editor.dispatch({
 });
 
 /* ── HMR: receive external file changes ────────────────── */
+function applyExternalUpdate({ code, version }) {
+  pendingExternalUpdate = null;
+  lastSavedCode = code;
+  currentSongVersion = version || currentSongVersion;
+  replaceAllCode(code);
+  localStorage.setItem('strudel_code', code);
+  updateDocumentState();
+  clearAllDirtyLines();
+  showToast('Updated from disk');
+}
+
 if (import.meta.hot) {
-  import.meta.hot.on('strudel:update', ({ code, version }) => {
+  import.meta.hot.on('strudel:update', ({ name, code, version }) => {
+    if (name && name !== currentSongName) return;
     if (code === getAllCode()) return;
     if (documentDirty) {
       pendingExternalUpdate = { code, version };
@@ -534,12 +596,7 @@ if (import.meta.hot) {
       showToast('The song changed on disk. Save to resolve the conflict or reopen it.');
       return;
     }
-    replaceAllCode(code);
-    lastSavedCode = code;
-    currentSongVersion = version || currentSongVersion;
-    localStorage.setItem('strudel_code', code);
-    updateDocumentState();
-    showToast('Updated from disk');
+    applyExternalUpdate({ code, version });
   });
 }
 
@@ -608,7 +665,15 @@ function clearQueuedUpdate() {
   syncGraphPerformance();
 }
 
+function stopPlayback() {
+  evalGeneration += 1;
+  clearQueuedUpdate();
+  editor.stop();
+}
+
 async function performEvaluation(allCode, autostart) {
+  const evalToken = evalGeneration;
+  let visualizerGeneration = null;
   const previousEvalCode = lastEvalCode;
   const previousActiveLoop = activeLoopedSectionName;
   const sections = parseSections(allCode);
@@ -649,6 +714,15 @@ async function performEvaluation(allCode, autostart) {
         (url) => loadBuffer(url, getAudioContext(), 'local audio'),
       ),
     ]);
+    // Stop was pressed while audio/samples were still preparing — starting
+    // the REPL now would restart playback the user just stopped.
+    if (evalToken !== evalGeneration) {
+      lastEvalCode = previousEvalCode;
+      activeLoopedSectionName = previousActiveLoop;
+      document.body.dataset.updateState = '';
+      updateMode();
+      return;
+    }
     let performanceCode = routeTracksForPlayback(allCode, tracks);
     if (loopedSection) {
       performanceCode += `\nall(pattern => pattern.ribbon(${loopedSection.start}, ${loopedSection.end - loopedSection.start}).early(${loopOffset}).timeline(${songCueTimeline}))`;
@@ -656,6 +730,7 @@ async function performEvaluation(allCode, autostart) {
       performanceCode += `\nall(pattern => pattern.early(${cueStart}).timeline(${songCueTimeline}))`;
     }
     const cueSchedulerCycle = pendingCueSchedulerCycle ?? schedulerCycle();
+    visualizerGeneration = globalThis.__stroodBeginVisualizerGeneration?.();
     await editor.repl.evaluate(performanceCode, autostart);
     if (shouldCueTimeline) {
       playbackSourceCycle = loopCueCycle ?? cueStart;
@@ -677,7 +752,15 @@ async function performEvaluation(allCode, autostart) {
     }
     updateDocumentState();
     syncGraphPerformance();
+    if (visualizerGeneration != null) {
+      requestAnimationFrame(() => {
+        globalThis.__stroodCommitVisualizerGeneration?.(visualizerGeneration);
+      });
+    }
   } catch (error) {
+    if (visualizerGeneration != null) {
+      globalThis.__stroodAbortVisualizerGeneration?.(visualizerGeneration);
+    }
     lastEvalCode = previousEvalCode;
     activeLoopedSectionName = previousActiveLoop;
     loopedSectionName = previousActiveLoop;
@@ -810,7 +893,7 @@ function createSecondaryEditor(initialCode = editor.code, columnIndex = 1) {
     root: panel,
     initialCode,
     onEvaluate: () => evaluateAll(),
-    onStop: () => editor.stop(),
+    onStop: stopPlayback,
     onChange: (update) => {
       if (update.docChanged) syncDocumentChanges(view, update.transactions);
     },
@@ -845,6 +928,7 @@ function setColumnCount(n) {
   const code = getAllCode();
   while (secondaryEditors.length) {
     const removed = secondaryEditors.pop();
+    releaseRippleScroller(removed.view.scrollDOM);
     removed.view.destroy();
     removed.root.remove();
   }
@@ -924,45 +1008,46 @@ function applyImmediateTrackMix(code) {
   }
 }
 
-graphController = createGraphViewController({
-  root: document.getElementById('graph-view'),
-  editors: editorsContainer,
-  codeButton: document.getElementById('code-view-btn'),
-  graphButton: document.getElementById('graph-view-btn'),
-  getCode: getAllCode,
-  getSongKey: () => currentSongName || 'Untitled',
-  onCodeChange: (
-    code,
-    { immediate = false, section = null, deferPlayback = false, trackControl = null } = {},
-  ) => {
-    if (section && loopedSectionName) loopedSectionName = null;
-    if (isPlaying && trackControl) applyImmediateTrackMix(code);
-    replaceAllCode(code);
-    if (isPlaying && !deferPlayback) {
-      evaluateAll(true, {
-        immediate,
-        cueSectionName: section,
-        finishCurrentSection: Boolean(section),
-      }).catch(() => {});
-    } else syncGraphPerformance();
-  },
-  onPlaySection: (code, section) => {
-    if (loopedSectionName) loopedSectionName = null;
-    clearQueuedUpdate();
-    replaceAllCode(code);
-    pauseRequested = false;
-    evaluateAll(true, {
-      immediate: true,
-      cueSectionName: section,
-    }).catch(showDiagnostic);
-  },
-  onToggleSectionLoop: toggleSectionLoop,
-});
+const graphButton = document.getElementById('graph-view-btn');
 
-let meterFrame = 0;
-let masterLevel = -1;
-let masterPeak = -1;
-let limiterLabel = '';
+function graphControllerOptions() {
+  return {
+    root: document.getElementById('graph-view'),
+    editors: editorsContainer,
+    codeButton: document.getElementById('code-view-btn'),
+    graphButton,
+    getCode: getAllCode,
+    getSongKey: () => currentSongName || 'Untitled',
+    onCodeChange: (
+      code,
+      { immediate = false, section = null, deferPlayback = false, trackControl = null } = {},
+    ) => {
+      if (section && loopedSectionName) loopedSectionName = null;
+      if (isPlaying && trackControl) applyImmediateTrackMix(code);
+      replaceAllCode(code);
+      if (isPlaying && !deferPlayback) {
+        evaluateAll(true, {
+          immediate,
+          cueSectionName: section,
+          finishCurrentSection: Boolean(section),
+        }).catch(() => {});
+      } else syncGraphPerformance();
+    },
+    onPlaySection: (code, section) => {
+      if (loopedSectionName) loopedSectionName = null;
+      clearQueuedUpdate();
+      replaceAllCode(code);
+      pauseRequested = false;
+      evaluateAll(true, {
+        immediate: true,
+        cueSectionName: section,
+      }).catch(showDiagnostic);
+    },
+    onToggleSectionLoop: toggleSectionLoop,
+  };
+}
+
+graphController = createGraphViewController(graphControllerOptions());
 
 function setMeterScale(element, next, previous) {
   const rounded = Math.round(next * 100) / 100;
@@ -971,23 +1056,22 @@ function setMeterScale(element, next, previous) {
 }
 
 function scheduleMeterUpdate() {
-  meterFrame = window.setTimeout(updateMasterMeter, isPlaying ? 50 : 250);
+  meterFrame = isPlaying ? window.setTimeout(updateMasterMeter, 50) : 0;
 }
 
 function updateMasterMeter() {
+  meterFrame = 0;
   if (document.hidden) {
-    meterFrame = 0;
     return;
   }
   let meter = { rmsDb: -Infinity, peakDb: -Infinity, compressionDb: 0, limiterDb: 0 };
-  if (audioIsRunning()) {
+  if (isPlaying && audioIsRunning()) {
     try {
       meter = readMasterMeter();
     } catch (_) {}
   }
   const level = Math.max(0, Math.min(1, (meter.rmsDb + 60) / 60));
   const peak = Math.max(0, Math.min(1, (meter.peakDb + 60) / 60));
-  document.dispatchEvent(new CustomEvent('strood:master-meter', { detail: { level, peak } }));
   masterLevel = setMeterScale(masterLevelEl, level, masterLevel);
   const peakPercent = Math.round(peak * 100);
   if (peakPercent !== masterPeak) {
@@ -1003,6 +1087,12 @@ function updateMasterMeter() {
   }
   syncGraphPerformance();
   scheduleMeterUpdate();
+}
+
+function restartMasterMeter() {
+  if (meterFrame) window.clearTimeout(meterFrame);
+  meterFrame = 0;
+  updateMasterMeter();
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -1026,6 +1116,19 @@ const rippleCanvases = new Map(); // scroller -> { canvas, ctx, w, h }
 const activeRipples = []; // { scroller, x, y, color, gain, startTime }
 let rippleRAF = 0; // 0 = not running
 const _byScroller = new Map(); // reused each frame to avoid alloc
+
+function releaseRippleScroller(scroller) {
+  const entry = rippleCanvases.get(scroller);
+  entry?.canvas.remove();
+  rippleCanvases.delete(scroller);
+  for (let index = activeRipples.length - 1; index >= 0; index -= 1) {
+    if (activeRipples[index].scroller === scroller) activeRipples.splice(index, 1);
+  }
+  if (!activeRipples.length && rippleRAF) {
+    cancelAnimationFrame(rippleRAF);
+    rippleRAF = 0;
+  }
+}
 
 function getOrCreateRippleCanvas(scroller) {
   let entry = rippleCanvases.get(scroller);
@@ -1064,6 +1167,13 @@ function spawnRipple(scroller, x, y, color, gain) {
 
 function drawRipples() {
   rippleRAF = 0;
+  if (editorsContainer.hidden) {
+    activeRipples.length = 0;
+    for (const { canvas, ctx, w, h } of rippleCanvases.values()) {
+      ctx.clearRect(0, 0, w || canvas.width, h || canvas.height);
+    }
+    return;
+  }
   const now = performance.now();
 
   // Group ripples by scroller, prune expired (swap-remove: O(1) per removal)
@@ -1307,7 +1417,11 @@ const RIPPLE_SUSTAIN_INTERVAL = 500; // ms between ripples for held notes
 
 const _origHighlight = editor.highlight.bind(editor);
 const HIGHLIGHT_INTERVAL = 100; // 10fps is sufficient for score tracking
+// Must stay well inside graph-view's 90ms sustain grace, which relies on
+// repeated dispatches to keep held notes alive.
+const GRAPH_ACTIVITY_INTERVAL = 33;
 let lastHighlightTime = 0;
+let lastGraphActivityTime = 0;
 let lastGraphCycleTime = null;
 const graphPlaybackView = document.getElementById('graph-view');
 
@@ -1381,23 +1495,38 @@ function hapUid(hap) {
   return hap.whole.begin * 1e6 + hap.whole.end; // numeric key, no string alloc
 }
 
+function solidPlaybackMark(color) {
+  return `background:${color};color:#ffffff;outline:none;box-shadow:none`;
+}
+
+function playbackMarkColor(hap, nowMs) {
+  const onsetTime = hap.whole ? onsetTimestamps.get(hapUid(hap)) : undefined;
+  return onsetTime !== undefined && nowMs - onsetTime < ONSET_FLASH_MS
+    ? '#ffffff'
+    : (hap.value?.color ?? 'var(--foreground)');
+}
+
 editor.highlight = function (haps, time) {
   const nowMs = performance.now();
   const graphVisible = graphPlaybackView && !graphPlaybackView.hidden;
   const editorHighlightDue = nowMs - lastHighlightTime >= HIGHLIGHT_INTERVAL;
-  if (!graphVisible) lastGraphCycleTime = null;
-  if (!graphVisible && !editorHighlightDue) return;
 
   if (graphVisible) {
+    // Skipped frames leave lastGraphCycleTime untouched, so the next
+    // processed frame's onset window still covers the gap.
+    if (nowMs - lastGraphActivityTime < GRAPH_ACTIVITY_INTERVAL) return;
+    lastGraphActivityTime = nowMs;
     const graphMusicalHaps = musicalHapsFrom(graphHapsForFrame(haps, time));
     updateOnsets(graphMusicalHaps, nowMs);
     dispatchGraphActivity(graphMusicalHaps, time, nowMs);
+    return;
   }
 
+  lastGraphCycleTime = null;
   if (!editorHighlightDue) return;
   lastHighlightTime = nowMs;
   const musicalHaps = musicalHapsFrom(haps);
-  if (!graphVisible) updateOnsets(musicalHaps, nowMs);
+  updateOnsets(musicalHaps, nowMs);
 
   if (nowMs < playbackScrollGuardUntil) return;
 
@@ -1413,27 +1542,12 @@ editor.highlight = function (haps, time) {
     }
   }
 
-  // Filter to musical locations only, then apply white flash for onsets
-  // Reuse the array when possible — only allocate new hap objects for flashing onsets
-  let hasFlash = false;
-  for (const [uid, ts] of onsetTimestamps) {
-    if (nowMs - ts < ONSET_FLASH_MS) { hasFlash = true; break; }
-  }
-
-  let mixedHaps;
-  if (hasFlash) {
-    mixedHaps = visibleHaps.map(h => {
-      if (!h.whole) return h;
-      const uid = hapUid(h);
-      const onsetTime = onsetTimestamps.get(uid);
-      if (onsetTime !== undefined && nowMs - onsetTime < ONSET_FLASH_MS) {
-        return { ...h, value: { ...h.value, color: '#ffffff', markcss: 'outline: solid 4px #ffffff' } };
-      }
-      return h;
-    });
-  } else {
-    mixedHaps = visibleHaps;
-  }
+  // Every playback mark is a flat solid block with white text. Onsets briefly
+  // use a white background, then the block takes the event colour.
+  const mixedHaps = visibleHaps.map((hap) => {
+    const color = playbackMarkColor(hap, nowMs);
+    return { ...hap, value: { ...hap.value, color, markcss: solidPlaybackMark(color) } };
+  });
   _origHighlight(mixedHaps, time);
 
   // Distribute highlights to secondary editors
@@ -1446,8 +1560,8 @@ editor.highlight = function (haps, time) {
       for (const originalHap of haps) {
         const hap = filterMusicalLocations(originalHap);
         if (!hap.context?.locations || !hap.whole) continue;
-        const color = hap.value?.color ?? 'var(--foreground)';
-        const style = hap.value?.markcss || `outline: solid 2px ${color}`;
+        const color = playbackMarkColor(hap, nowMs);
+        const style = solidPlaybackMark(color);
         for (const loc of hap.context.locations) {
           const from = loc.start;
           const to = loc.end;
@@ -1559,8 +1673,7 @@ async function onEditorKeydown(e) {
   // Ctrl+. — stop
   if (ctrl && e.key === '.') {
     e.preventDefault();
-    clearQueuedUpdate();
-    editor.stop();
+    stopPlayback();
     return;
   }
 
@@ -1594,11 +1707,19 @@ async function onEditorKeydown(e) {
 }
 
 /* ── Save / Load songs (file-backed via /api/songs) ──── */
+// The 20Hz meter tick calls this during playback; CodeMirror's Text is
+// immutable, so caching by doc reference is exact.
 function getAllCode() {
-  return editor.editor.state.doc.toString();
+  const doc = editor.editor.state.doc;
+  if (doc !== cachedAllCodeDoc) {
+    cachedAllCodeDoc = doc;
+    cachedAllCode = doc.toString();
+  }
+  return cachedAllCode;
 }
 
 async function saveSong() {
+  if (startupLoadPromise) await startupLoadPromise;
   const name = currentSongName || await promptDialog({
     title: 'Save song',
     label: 'Song name',
@@ -1686,43 +1807,127 @@ async function deleteSong(name) {
 let songBrowserEl = null;
 let songBrowserPreviousFocus = null;
 
-async function prepareToReplaceCurrent(action) {
-  if (!documentDirty) return true;
-  const choice = await choiceDialog({
-    title: 'Unsaved changes',
-    message: `What should Strood do with changes to “${currentSongName || 'Untitled'}” before ${action}?`,
-    choices: [
-      { value: null, label: 'Cancel' },
+function createUnsavedDiffView() {
+  const diff = document.createElement('div');
+  diff.className = 'unsaved-diff';
+  diff.setAttribute('aria-label', 'Changes since the last save');
+  for (const row of diffLines(lastSavedCode, getAllCode())) {
+    const element = document.createElement('div');
+    element.className = `unsaved-diff-row ${row.type}`;
+    if (row.type === 'skip') {
+      element.textContent = `${row.count} unchanged line${row.count === 1 ? '' : 's'}`;
+      diff.appendChild(element);
+      continue;
+    }
+    const oldLine = document.createElement('span');
+    oldLine.className = 'unsaved-diff-line';
+    oldLine.textContent = row.oldLine || '';
+    const newLine = document.createElement('span');
+    newLine.className = 'unsaved-diff-line';
+    newLine.textContent = row.newLine || '';
+    const marker = document.createElement('span');
+    marker.className = 'unsaved-diff-marker';
+    marker.textContent = row.type === 'add' ? '+' : (row.type === 'remove' ? '−' : '');
+    const code = document.createElement('span');
+    code.className = 'unsaved-diff-code';
+    code.textContent = row.text || ' ';
+    element.append(oldLine, newLine, marker, code);
+    diff.appendChild(element);
+  }
+  return diff;
+}
+
+function reviewUnsavedChanges({ beforeAction = null } = {}) {
+  const choices = beforeAction
+    ? [
+      { value: 'back', label: 'Back' },
       { value: 'save', label: 'Save changes', primary: true },
       { value: 'discard', label: 'Discard', danger: true },
-    ],
+    ]
+    : [
+      { value: null, label: 'Close' },
+      { value: 'save', label: 'Save changes', primary: true },
+    ];
+  return choiceDialog({
+    title: `Unsaved changes · ${currentSongName || 'Untitled'}`,
+    message: `Compared with the last saved copy${beforeAction ? ` before ${beforeAction}` : ''}.`,
+    content: createUnsavedDiffView(),
+    choices,
+    className: 'app-dialog-wide',
   });
-  if (choice === 'save') return Boolean(await saveSong());
-  return choice === 'discard';
+}
+
+async function prepareToReplaceCurrent(action) {
+  if (!documentDirty) return true;
+  while (documentDirty) {
+    const choice = await choiceDialog({
+      title: 'Unsaved changes',
+      message: `What should Strood do with changes to “${currentSongName || 'Untitled'}” before ${action}?`,
+      choices: [
+        { value: null, label: 'Cancel' },
+        { value: 'review', label: 'See changes' },
+        { value: 'save', label: 'Save changes', primary: true },
+        { value: 'discard', label: 'Discard', danger: true },
+      ],
+    });
+    if (choice === 'review') {
+      const reviewed = await reviewUnsavedChanges({ beforeAction: action });
+      if (reviewed === 'back') continue;
+      if (reviewed === 'save') {
+        if (!(await saveSong())) return false;
+        continue;
+      }
+      return reviewed === 'discard';
+    }
+    if (choice === 'save') {
+      // Loop instead of returning: edits typed while the save was in flight
+      // leave the document dirty again and deserve their own pass.
+      if (!(await saveSong())) return false;
+      continue;
+    }
+    return choice === 'discard';
+  }
+  return true;
 }
 
 async function newSong() {
   if (!(await prepareToReplaceCurrent('creating a new song'))) return;
+  songOpenSerial += 1;
   saveRecoverySnapshot(currentSongName, getAllCode(), 'before new song');
   loadSong('', null, null, '');
   editor.editor.focus();
 }
 
+let songOpenSerial = 0;
+
 async function openNamedSong(name) {
   if (!(await prepareToReplaceCurrent(`opening “${name}”`))) return;
+  const token = ++songOpenSerial;
+  const cleanCode = getAllCode();
   try {
     const song = await readSong(name);
+    if (token !== songOpenSerial) return;
+    if (getAllCode() !== cleanCode && !(await prepareToReplaceCurrent(`opening “${name}”`))) return;
+    if (token !== songOpenSerial) return;
     loadSong(song.code, name, song.version, song.code);
-  } catch (error) { showDiagnostic(error); }
+  } catch (error) {
+    if (token !== songOpenSerial) return;
+    showDiagnostic(error);
+  }
 }
 
 async function restoreSongVersion(name, code) {
+  const token = ++songOpenSerial;
   try {
     const current = await readSong(name);
+    if (token !== songOpenSerial) return;
     loadSong(code, name, current.version, current.code);
     setSaveState('Recovered, unsaved', 'unsaved');
     showToast('Recovery opened. Save to make it current.');
-  } catch (error) { showDiagnostic(error); }
+  } catch (error) {
+    if (token !== songOpenSerial) return;
+    showDiagnostic(error);
+  }
 }
 
 function songAction(label, onClick, className = '') {
@@ -1931,13 +2136,16 @@ runBtn.addEventListener('click', () => {
 });
 stopBtn.addEventListener('click', () => {
   if (!isPlaying) return;
-  clearQueuedUpdate();
-  editor.stop();
+  stopPlayback();
 });
 updateBtn.addEventListener('click', () => {
   evaluateAll().catch(() => {});
 });
 document.getElementById('save-btn').addEventListener('click', saveSong);
+saveStateEl.addEventListener('click', async () => {
+  if (!documentDirty) return;
+  if (await reviewUnsavedChanges() === 'save') await saveSong();
+});
 document.getElementById('open-btn').addEventListener('click', showSongBrowser);
 document.getElementById('new-btn').addEventListener('click', newSong);
 document.getElementById('patch-btn').addEventListener('click', () => openPatchEditor().catch(showDiagnostic));
@@ -1947,16 +2155,57 @@ updateMasterMeter();
 visualizerController.refresh();
 
 /* ── Startup: restore last synced song from disk ────────── */
-(async () => {
-  const songName = localStorage.getItem('strudel_song_name') || 'ms jackson';
+startupLoadPromise = (async () => {
+  const songName = localStorage.getItem('strudel_song_name') || DEFAULT_SONG_NAME;
+  const displayedCode = getAllCode();
+  const token = ++songOpenSerial;
   try {
     const song = await readSong(songName);
+    if (token !== songOpenSerial) return;
+    if (getAllCode() !== displayedCode) {
+      // The user typed before the disk copy arrived. Keep their buffer and
+      // adopt the song's identity so the next save runs the If-Match check.
+      currentSongName = songName;
+      currentSongVersion = song.version;
+      lastSavedCode = song.code;
+      localStorage.setItem('strudel_song_name', songName);
+      updateDocumentState();
+      return;
+    }
     loadSong(song.code, songName, song.version, song.code);
   } catch (error) {
+    if (token !== songOpenSerial) return;
     lastSavedCode = '';
     currentSongName = null;
     currentSongVersion = null;
+    const missingSong = error instanceof ApiError && error.status === 404;
+    if (missingSong) localStorage.removeItem('strudel_song_name');
     updateDocumentState();
-    if (!(error instanceof ApiError) || error.status !== 404) showDiagnostic(error);
+    if (!missingSong) {
+      showDiagnostic(error);
+      return;
+    }
+
+    // A deleted cached song used to strand an empty editor as Untitled forever.
+    // Recover a still-blank buffer, but never replace code typed while startup ran.
+    if (displayedCode.trim() || getAllCode() !== displayedCode) return;
+    if (songName !== DEFAULT_SONG_NAME) {
+      try {
+        const fallback = await readSong(DEFAULT_SONG_NAME);
+        if (token !== songOpenSerial || getAllCode() !== displayedCode) return;
+        loadSong(fallback.code, DEFAULT_SONG_NAME, fallback.version, fallback.code);
+        return;
+      } catch (fallbackError) {
+        if (token !== songOpenSerial) return;
+        if (!(fallbackError instanceof ApiError) || fallbackError.status !== 404) {
+          showDiagnostic(fallbackError);
+          return;
+        }
+      }
+    }
+
+    if (getAllCode() === displayedCode) {
+      loadSong(initialSongCode, null, null, initialSongCode);
+    }
   }
 })();
