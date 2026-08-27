@@ -9,6 +9,7 @@ const graphVisibleCanvases = globalThis.__stroodGraphVisibleCanvases ||= new Set
 const visualizerRegistry = globalThis.__stroodVisualizerRegistry ||= new Map();
 const VISUALIZERS_KEY = 'strood:visualizers-enabled';
 const _cymaticsCache = new Map();
+let registryGeneration = 0;
 globalThis.__stroodVisualizersEnabled ??= localStorage.getItem(VISUALIZERS_KEY) !== 'false';
 const canvasObserver = typeof IntersectionObserver === 'undefined'
   ? null
@@ -36,6 +37,50 @@ function setCanvasBuffer(entry, enabled) {
   if (!enabled) entry.canvas.getContext('2d')?.clearRect(0, 0, 1, 1);
 }
 
+function releaseCanvas(entry) {
+  if (!entry?.canvas) return;
+  canvasObserver?.unobserve(entry.canvas);
+  observedCanvases.delete(entry.canvas);
+  visibleCanvases.delete(entry.canvas);
+  graphVisibleCanvases.delete(entry.canvas);
+  entry.canvas.width = 1;
+  entry.canvas.height = 1;
+}
+
+function beginVisualizerGeneration() {
+  registryGeneration += 1;
+  return registryGeneration;
+}
+
+function commitVisualizerGeneration(generation) {
+  if (generation !== registryGeneration) return;
+  let removed = false;
+  for (const [id, entry] of visualizerRegistry) {
+    if (entry.generation === generation) continue;
+    releaseCanvas(entry);
+    visualizerRegistry.delete(id);
+    removed = true;
+  }
+  if (removed) {
+    _cymaticsCache.clear();
+    document.dispatchEvent(new CustomEvent('strood:visualizer-canvas'));
+  }
+}
+
+function abortVisualizerGeneration(generation) {
+  if (generation !== registryGeneration) return;
+  for (const [id, entry] of visualizerRegistry) {
+    releaseCanvas(entry);
+    visualizerRegistry.delete(id);
+  }
+  _cymaticsCache.clear();
+  document.dispatchEvent(new CustomEvent('strood:visualizer-canvas'));
+}
+
+globalThis.__stroodBeginVisualizerGeneration = beginVisualizerGeneration;
+globalThis.__stroodCommitVisualizerGeneration = commitVisualizerGeneration;
+globalThis.__stroodAbortVisualizerGeneration = abortVisualizerGeneration;
+
 document.addEventListener('strood:visualizers-enabled', (event) => {
   const enabled = Boolean(event.detail?.enabled);
   globalThis.__stroodVisualizersEnabled = enabled;
@@ -46,6 +91,7 @@ document.addEventListener('strood:visualizers-enabled', (event) => {
 function canvasIsVisible(canvas) {
   if (!visualizersEnabled()) return false;
   if (document.hidden) return false;
+  if (globalThis.__stroodGraphVisualizersActive) return graphVisibleCanvases.has(canvas);
   if (graphVisibleCanvases.has(canvas)) return true;
   if (!canvas.isConnected) return false;
   if (canvasObserver) return visibleCanvases.has(canvas);
@@ -73,7 +119,7 @@ function getCanvasWidget(id, options = {}, method = '') {
   const { width = 500, height = 60, pixelRatio = DEFAULT_PIXEL_RATIO } = options;
   let canvas = document.getElementById(id) || document.createElement('canvas');
   const previous = visualizerRegistry.get(id);
-  if (previous?.canvas && previous.canvas !== canvas) canvasObserver?.unobserve(previous.canvas);
+  if (previous?.canvas && previous.canvas !== canvas) releaseCanvas(previous);
   canvas.style.width = width + 'px';
   canvas.style.height = height + 'px';
   setWidget(id, canvas);
@@ -83,6 +129,7 @@ function getCanvasWidget(id, options = {}, method = '') {
     id,
     method,
     canvas,
+    generation: registryGeneration,
     pixelWidth: Math.max(1, Math.round(width * pixelRatio)),
     pixelHeight: Math.max(1, Math.round(height * pixelRatio)),
   };
@@ -98,7 +145,18 @@ registerWidget('_spiral', (id, options = {}, pat) => {
   const size = options.size || 275;
   options = { width: size, height: size, ...options, size: size / 5 };
   const canvas = getCanvasWidget(id, options, '_spiral');
-  return pat.tag(id).spiral({ ...options, ctx: canvas.getContext('2d'), id });
+  const shouldPaint = createPaintGate(canvas, options.fps || 30);
+  const tagged = pat.tag(id);
+  const onPaint = tagged.onPaint;
+  // Strudel's spiral painter is private, but spiral() installs it through the
+  // pattern instance's onPaint method. Shadow that method on this tagged copy
+  // so the complete built-in painter is skipped when the canvas is off-screen.
+  tagged.onPaint = function gatedOnPaint(painter) {
+    return onPaint.call(this, (...args) => {
+      if (shouldPaint()) painter(...args);
+    });
+  };
+  return tagged.spiral({ ...options, ctx: canvas.getContext('2d'), id });
 });
 
 registerWidget('_scope', (id, options = {}, pat) => {
@@ -118,7 +176,7 @@ registerWidget('_scope', (id, options = {}, pat) => {
   let displayScale = Math.max(0.01, Number(options.scale) || 1);
   let hasSignal = false;
 
-  return pat.tag(id).analyze(id).draw((haps) => {
+  return pat.tag(id).analyze(id).onPaint((_, time, haps) => {
     if (!shouldPaint()) return;
     const analyser = analysers[id];
     if (analyser && options.autoScale !== false) {
@@ -139,14 +197,15 @@ registerWidget('_scope', (id, options = {}, pat) => {
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const color = haps.find(hap => hap.hasTag(id) && hap.isActive(time))?.value?.color;
     drawTimeScope(analyser, {
       ...options,
-      color: haps[0]?.value?.color || options.color || 'white',
+      color: color || options.color || 'white',
       scale: displayScale,
       ctx,
       id,
     });
-  }, { id });
+  });
 });
 
 /* ── Widget 1: _lissajous — Interval Geometry ──────────── */

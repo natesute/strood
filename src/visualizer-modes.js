@@ -3,18 +3,28 @@ export function createInlineVisualizerController() {
 
   function indexWidgets() {
     indexFrame = 0;
+    const trackLinesByEditor = new Map();
     document.querySelectorAll('.cm-content canvas[id^="_widget"]').forEach((canvas) => {
       const content = canvas.closest('.cm-content');
-      const lines = content ? [...content.querySelectorAll('.cm-line[data-track]')] : [];
       const containingLine = canvas.closest('.cm-line[data-track]');
       let previousTrackLine = canvas.previousElementSibling;
       while (previousTrackLine && !previousTrackLine.matches?.('.cm-line[data-track]')) {
         previousTrackLine = previousTrackLine.previousElementSibling;
       }
-      const anchor = containingLine || previousTrackLine || lines.reduce((nearest, line) => {
-        if (line.offsetTop > canvas.offsetTop) return nearest;
-        return !nearest || line.offsetTop >= nearest.offsetTop ? line : nearest;
-      }, null);
+      let anchor = containingLine || previousTrackLine;
+      if (!anchor && content) {
+        let lines = trackLinesByEditor.get(content);
+        if (!lines) {
+          lines = [...content.querySelectorAll('.cm-line[data-track]')]
+            .map((line) => ({ line, top: line.offsetTop }));
+          trackLinesByEditor.set(content, lines);
+        }
+        const canvasTop = canvas.offsetTop;
+        for (const entry of lines) {
+          if (entry.top > canvasTop) break;
+          anchor = entry.line;
+        }
+      }
       if (anchor) {
         canvas.dataset.track = anchor.dataset.track;
       } else {

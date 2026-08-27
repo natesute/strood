@@ -23,6 +23,7 @@ let graphEl, innerEl, wiresSvg, bottomBar;
 let panX = 0, panY = 0;
 let graphScale = 1;
 let dragWire = null; // { fromId, fromType, svgPath }
+let wireFrame = 0;
 
 const modColors = ['#56d4dd', '#c678dd', '#7ee787', '#e6b450', '#ff5370'];
 const patchSoundAliases = {
@@ -79,6 +80,7 @@ function recordHistory() {
 }
 function restoreSnapshot(snapshot) {
   patchDef = JSON.parse(snapshot);
+  patchEditSerial += 1;
   selectedModuleId = null;
   registerPatch(currentPatchName, patchDef);
   setPatchDirty(true);
@@ -125,7 +127,7 @@ function setGraphScale(nextScale, anchorX = graphEl?.clientWidth / 2, anchorY = 
     panY = anchorY - ((anchorY - panY) / previous) * graphScale;
   }
   applyGraphTransform();
-  requestAnimationFrame(drawWires);
+  scheduleWireDraw();
   const readout = overlayEl?.querySelector('.pe-zoom-readout');
   if (readout) readout.textContent = `${Math.round(graphScale * 100)}%`;
 }
@@ -143,7 +145,7 @@ function fitGraph() {
   panX = (graphEl.clientWidth - width * graphScale) / 2 - minX * graphScale;
   panY = (graphEl.clientHeight - height * graphScale) / 2 - minY * graphScale;
   applyGraphTransform();
-  requestAnimationFrame(drawWires);
+  scheduleWireDraw();
   const readout = overlayEl?.querySelector('.pe-zoom-readout');
   if (readout) readout.textContent = `${Math.round(graphScale * 100)}%`;
 }
@@ -234,6 +236,7 @@ function createEnvelopeDisplay(moduleId, def) {
   line.setAttribute('stroke-width', '1.5'); line.setAttribute('opacity', '0.7');
   svg.appendChild(line);
 
+  const labelElements = [];
   ['A', 'D', 'S', 'R'].forEach((txt, i) => {
     const xs = [(pad + ax) / 2, (ax + dx) / 2, (dx + sx) / 2, (sx + rx) / 2];
     const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -242,6 +245,7 @@ function createEnvelopeDisplay(moduleId, def) {
     lbl.setAttribute('font-size', '7'); lbl.setAttribute('font-family', 'Fragment Mono, monospace');
     lbl.textContent = txt;
     svg.appendChild(lbl);
+    labelElements.push(lbl);
   });
 
   // Draggable handles
@@ -250,6 +254,38 @@ function createEnvelopeDisplay(moduleId, def) {
     { x: dx, y: sy },
     { x: rx, y: bot },
   ];
+  const handleElements = [];
+
+  function updateEnvelopeGeometry() {
+    const nextA = def.params.a ?? 0.01;
+    const nextD = def.params.d ?? 0.1;
+    const nextS = def.params.s ?? 0.5;
+    const nextR = def.params.r ?? 0.3;
+    const nextTotal = nextA + nextD + 0.3 + nextR;
+    const nextAx = pad + (nextA / nextTotal) * iw;
+    const nextDx = nextAx + (nextD / nextTotal) * iw;
+    const nextSx = nextDx + (0.3 / nextTotal) * iw;
+    const nextRx = nextSx + (nextR / nextTotal) * iw;
+    const nextSy = top + (1 - nextS) * ih;
+    const points = [
+      { x: nextAx, y: top },
+      { x: nextDx, y: nextSy },
+      { x: nextRx, y: bot },
+    ];
+    area.setAttribute('d', `M${pad},${bot} L${nextAx},${top} L${nextDx},${nextSy} L${nextSx},${nextSy} L${nextRx},${bot} Z`);
+    line.setAttribute('d', `M${pad},${bot} L${nextAx},${top} L${nextDx},${nextSy} L${nextSx},${nextSy} L${nextRx},${bot}`);
+    const labelXs = [(pad + nextAx) / 2, (nextAx + nextDx) / 2, (nextDx + nextSx) / 2, (nextSx + nextRx) / 2];
+    labelElements.forEach((label, index) => label.setAttribute('x', labelXs[index]));
+    handleElements.forEach((handle, index) => {
+      handle.setAttribute('cx', points[index].x);
+      handle.setAttribute('cy', points[index].y);
+      handle.setAttribute('aria-valuenow', String([nextA, nextD, nextR][index]));
+      if (index === 1) {
+        handle.setAttribute('aria-valuetext', `Decay ${nextD.toFixed(2)}, sustain ${nextS.toFixed(2)}`);
+      }
+    });
+  }
+
   handles.forEach((pt, idx) => {
     const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     c.setAttribute('cx', pt.x); c.setAttribute('cy', pt.y); c.setAttribute('r', 4);
@@ -264,6 +300,7 @@ function createEnvelopeDisplay(moduleId, def) {
     c.setAttribute('aria-valuenow', String([a, d, r][idx]));
     if (idx === 1) c.setAttribute('aria-valuetext', `Decay ${d.toFixed(2)}, sustain ${s.toFixed(2)}`);
     svg.appendChild(c);
+    handleElements.push(c);
 
     c.addEventListener('keydown', (event) => {
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -294,9 +331,15 @@ function createEnvelopeDisplay(moduleId, def) {
         } else {
           def.params.r = Math.max(0.01, r + (ddx / iw) * total);
         }
-        commitPatch(); renderAll();
+        updateEnvelopeGeometry();
+        commitPatch();
       };
-      const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        commitPatch();
+        renderAll();
+      };
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
     });
@@ -519,7 +562,7 @@ function createNode(id) {
       node.style.left = pos.x + 'px';
       node.style.top = pos.y + 'px';
       patchDef.positions[id] = { x: pos.x, y: pos.y };
-      drawWires();
+      scheduleWireDraw();
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -741,16 +784,18 @@ function finishModConnection(targetDst) {
 function drawWires() {
   if (!wiresSvg || !innerEl) return;
   wiresSvg.innerHTML = '';
+  const innerRect = innerEl.getBoundingClientRect();
 
   const getPortCenter = (moduleId, portClass) => {
     const node = innerEl.querySelector(`[data-module-id="${moduleId}"]`);
     if (!node) return null;
     const port = node.querySelector(portClass);
     if (!port) return null;
-    const nr = node.getBoundingClientRect();
     const pr = port.getBoundingClientRect();
-    const ir = innerEl.getBoundingClientRect();
-    return { x: (pr.left + pr.width / 2 - ir.left) / graphScale, y: (pr.top + pr.height / 2 - ir.top) / graphScale };
+    return {
+      x: (pr.left + pr.width / 2 - innerRect.left) / graphScale,
+      y: (pr.top + pr.height / 2 - innerRect.top) / graphScale,
+    };
   };
 
   // Signal wires
@@ -771,14 +816,24 @@ function drawWires() {
     const knobEl = innerEl.querySelector(`[data-target="${mod.dst}"]`);
     if (!from || !knobEl) return;
     const kr = knobEl.getBoundingClientRect();
-    const ir = innerEl.getBoundingClientRect();
-    const to = { x: (kr.left + kr.width / 2 - ir.left) / graphScale, y: (kr.top + kr.height / 2 - ir.top) / graphScale };
+    const to = {
+      x: (kr.left + kr.width / 2 - innerRect.left) / graphScale,
+      y: (kr.top + kr.height / 2 - innerRect.top) / graphScale,
+    };
     const midX = (from.x + to.x) / 2;
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', `M${from.x},${from.y} C${midX},${from.y} ${midX},${to.y} ${to.x},${to.y}`);
     path.setAttribute('class', 'pe-wire-mod');
     path.setAttribute('stroke', modColors[i % modColors.length]);
     wiresSvg.appendChild(path);
+  });
+}
+
+function scheduleWireDraw() {
+  if (wireFrame) return;
+  wireFrame = requestAnimationFrame(() => {
+    wireFrame = 0;
+    drawWires();
   });
 }
 
@@ -871,7 +926,7 @@ function renderAll() {
   renderBottomBar();
 
   // Draw wires after DOM layout
-  requestAnimationFrame(() => drawWires());
+  scheduleWireDraw();
 }
 
 // ── Module palette ────────────────────────────────────────
@@ -1105,15 +1160,17 @@ function buildOverlay() {
 }
 
 // ── Patch load/save ──────────────────────────────────────
-async function loadPatchList(selectEl) {
+async function loadPatchList(selectEl, { loadSelection = true } = {}) {
   try {
     const patches = await listPatches();
     selectEl.innerHTML = patches.map(p =>
       `<option value="${p.name}"${p.name === currentPatchName ? ' selected' : ''}>${p.name}</option>`
     ).join('');
     selectEl.onchange = () => loadPatch(selectEl.value);
-    if (!currentPatchName && patches.length > 0) loadPatch(patches[0].name);
-    else if (currentPatchName) loadPatch(currentPatchName);
+    if (loadSelection) {
+      if (!currentPatchName && patches.length > 0) loadPatch(patches[0].name);
+      else if (currentPatchName) loadPatch(currentPatchName);
+    }
   } catch { selectEl.innerHTML = '<option>no patches</option>'; }
 }
 
@@ -1129,9 +1186,23 @@ async function loadPatch(name) {
     return;
   }
   const loadToken = ++patchLoadSerial;
+  const editsAtLoad = patchEditSerial;
+  const patchNameAtLoad = currentPatchName;
   try {
     const data = await readPatch(name);
     if (loadToken !== patchLoadSerial) return;
+    if (currentPatchName !== patchNameAtLoad) return;
+    if (patchEditSerial !== editsAtLoad && patchDirty && !(await confirmDialog({
+      title: 'Discard patch changes?',
+      message: `Discard unsaved changes to “${currentPatchName}”?`,
+      confirmLabel: 'Discard',
+      danger: true,
+    }))) {
+      const select = overlayEl?.querySelector('.pe-select');
+      if (select) select.value = currentPatchName;
+      return;
+    }
+    if (loadToken !== patchLoadSerial || currentPatchName !== patchNameAtLoad) return;
     patchDef = data;
     currentPatchName = name;
     announcePatchFocus(false);
@@ -1143,7 +1214,10 @@ async function loadPatch(name) {
     setPatchDirty(false);
     renderAll();
     requestAnimationFrame(fitGraph);
-  } catch (e) { console.warn('[patch-editor] Failed to load:', name, e); }
+  } catch (e) {
+    if (loadToken !== patchLoadSerial || currentPatchName !== patchNameAtLoad) return;
+    console.warn('[patch-editor] Failed to load:', name, e);
+  }
 }
 
 async function savePatch() {
@@ -1177,7 +1251,7 @@ async function saveAsPatch() {
   }
   registerPatch(name, patchDef);
   const sel = overlayEl?.querySelector('.pe-select');
-  if (sel) loadPatchList(sel);
+  if (sel) await loadPatchList(sel, { loadSelection: false });
 }
 
 // ── Mini keyboard ────────────────────────────────────────
@@ -1287,6 +1361,8 @@ export async function closePatchEditor() {
       setPatchDirty(false);
     }
     closeContextMenu();
+    if (wireFrame) cancelAnimationFrame(wireFrame);
+    wireFrame = 0;
     overlayEl.remove();
     overlayEl = null;
     graphEl = innerEl = wiresSvg = bottomBar = null;
