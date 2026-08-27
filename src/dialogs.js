@@ -6,13 +6,13 @@ function closeActive(value = null) {
   activeDialog?.finish(value);
 }
 
-function createDialog({ title, message, fields = [], actions }) {
+function createDialog({ title, message, content = null, fields = [], actions, className = '' }) {
   closeActive(null);
   const previousFocus = document.activeElement;
   const overlay = document.createElement('div');
   overlay.className = 'app-dialog-backdrop';
   const panel = document.createElement('form');
-  panel.className = 'app-dialog';
+  panel.className = `app-dialog ${className}`.trim();
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-modal', 'true');
   panel.setAttribute('aria-label', title);
@@ -25,6 +25,7 @@ function createDialog({ title, message, fields = [], actions }) {
     copy.textContent = message;
     panel.appendChild(copy);
   }
+  if (content) panel.appendChild(content);
 
   const inputs = {};
   fields.forEach((field) => {
@@ -114,8 +115,8 @@ export async function promptDialog({ title, message = '', label, value = '', pla
   return result?.value?.trim() || null;
 }
 
-export function choiceDialog({ title, message, choices }) {
-  return createDialog({ title, message, actions: choices });
+export function choiceDialog({ title, message, content, choices, className }) {
+  return createDialog({ title, message, content, actions: choices, className });
 }
 
 export async function formDialog({ title, message = '', fields, confirmLabel = 'Add' }) {
@@ -126,4 +127,3 @@ export async function formDialog({ title, message = '', fields, confirmLabel = '
     actions: [{ label: 'Cancel', value: null }, { label: confirmLabel, submit: true, primary: true }],
   });
 }
-
