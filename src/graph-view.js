@@ -22,16 +22,15 @@ import {
   planOrthogonalBridges,
   routeOrthogonalEdges,
 } from './orthogonal-router.js';
-import { parseSections, sectionAtCycle, setSelectedSongSection } from './song-metadata.js';
+import { parseSections, sectionAtCycle } from './song-metadata.js';
 import { createShiftLens } from './shift-lens.js';
+import { organicLayout } from './organic-layout.js';
 
 const TRACK_WIDTH = 190;
 const TRACK_HEIGHT = 140;
 const NOTES_WIDTH = 330;
 const NOTES_HEIGHT = 172;
-const CLUSTER_GAP = 18;
 const NODE_GAP = 10;
-const NOTE_COLUMN_OFFSET = TRACK_WIDTH + 10;
 const GRAPH_PADDING_X = 18;
 const GRAPH_PADDING_Y = 24;
 const LAYOUT_PREFIX = 'strood:graph-layout:v9:';
@@ -84,158 +83,24 @@ function hasMusicalTokens(source) {
   return found;
 }
 
-function noteColumnCount(noteCount, viewportWidth, viewportHeight) {
-  if (!noteCount) return 0;
-  const viewportAspect = Math.max(.65, Math.min(3, viewportWidth / Math.max(1, viewportHeight)));
-  const preferred = Math.ceil(Math.sqrt(
-    noteCount * viewportAspect * (NOTES_HEIGHT + NODE_GAP) / (NOTES_WIDTH + NODE_GAP),
-  ));
-  return Math.max(1, Math.min(4, noteCount, preferred));
-}
-
-function packRows(plans, maximumWidth) {
-  const rows = [];
-  const ordered = [...plans].sort((left, right) =>
-    right.height - left.height || right.width - left.width || left.index - right.index);
-
-  for (const plan of ordered) {
-    let bestRow = null;
-    let smallestRemainder = Infinity;
-    for (const row of rows) {
-      const proposedWidth = row.width + CLUSTER_GAP + plan.width;
-      if (proposedWidth > maximumWidth) continue;
-      const remainder = maximumWidth - proposedWidth;
-      if (remainder < smallestRemainder) {
-        bestRow = row;
-        smallestRemainder = remainder;
-      }
-    }
-    if (bestRow) {
-      bestRow.items.push(plan);
-      bestRow.width += CLUSTER_GAP + plan.width;
-      bestRow.height = Math.max(bestRow.height, plan.height);
-    } else {
-      rows.push({ items: [plan], width: plan.width, height: plan.height });
-    }
-  }
-
-  return {
-    rows,
-    width: Math.max(...rows.map(({ width }) => width), 0),
-    height: rows.reduce((height, row, index) =>
-      height + row.height + (index ? CLUSTER_GAP : 0), 0),
-  };
-}
-
-function bestPacking(plans, viewportWidth, viewportHeight) {
-  const minimumWidth = Math.max(...plans.map(({ width }) => width), 0);
-  const maximumWidth = plans.reduce((width, plan, index) =>
-    width + plan.width + (index ? CLUSTER_GAP : 0), 0);
-  const range = maximumWidth - minimumWidth;
-  const samples = Math.max(1, Math.min(56, Math.ceil(range / 96)));
-  let best = null;
-
-  for (let index = 0; index <= samples; index++) {
-    const candidateWidth = minimumWidth + range * index / samples;
-    const packed = packRows(plans, candidateWidth);
-    const surfaceWidth = packed.width + GRAPH_PADDING_X + 24;
-    const surfaceHeight = packed.height + GRAPH_PADDING_Y + 24;
-    const scale = Math.min(
-      1,
-      (viewportWidth - 24) / surfaceWidth,
-      (viewportHeight - 24) / surfaceHeight,
-    );
-    const coverage = surfaceWidth * surfaceHeight * scale * scale
-      / Math.max(1, viewportWidth * viewportHeight);
-    if (!best || scale > best.scale + .0001
-      || (Math.abs(scale - best.scale) <= .0001 && coverage > best.coverage)) {
-      best = { ...packed, scale, coverage };
-    }
-  }
-  return best;
-}
-
 export function automaticLayout(graph, viewportWidth = 1280, viewportHeight = 720) {
-  const layout = {};
-  const placed = new Set();
-  const plannedNotes = new Set();
-  const plans = graph.tracks
+  const trackNames = new Set(graph.tracks
     .filter(({ declaration }) => declaration)
-    .map((track, index) => {
-      const notes = track.notes.filter(({ name }) =>
-        !plannedNotes.has(name) && graph.codeNodes.some((node) => node.name === name));
-      notes.forEach(({ name }) => plannedNotes.add(name));
-      const visualizers = graph.visualizers.filter(({ target }) =>
-        target === track.declaration.name || notes.some(({ name }) => name === target));
-      const noteColumns = noteColumnCount(notes.length, viewportWidth, viewportHeight);
-      const noteRows = noteColumns ? Math.ceil(notes.length / noteColumns) : 0;
-      const noteWidth = noteColumns
-        ? noteColumns * NOTES_WIDTH + Math.max(0, noteColumns - 1) * NODE_GAP
-        : 0;
-      const noteHeight = noteRows
-        ? noteRows * NOTES_HEIGHT + Math.max(0, noteRows - 1) * NODE_GAP
-        : 0;
-      const visualHeight = visualizers.reduce((height, visualizer) =>
-        height + defaultVisualizerSize(visualizer.method).height + NODE_GAP, 0);
-      const railWidth = Math.max(
-        TRACK_WIDTH,
-        ...visualizers.map(({ method }) => defaultVisualizerSize(method).width),
-      );
-      const declarationHeight = TRACK_HEIGHT;
-      return {
-        index,
-        track,
-        notes,
-        visualizers,
-        noteColumns,
-        declarationHeight,
-        width: noteColumns
-          ? NOTE_COLUMN_OFFSET + noteWidth + GRAPH_PADDING_X
-          : Math.max(196, railWidth + GRAPH_PADDING_X * 2),
-        height: Math.max(196, noteHeight + 24, declarationHeight + visualHeight + 30),
-      };
-    });
-  if (!plans.length) return layout;
-
-  const packing = bestPacking(plans, viewportWidth, viewportHeight);
-  let y = GRAPH_PADDING_Y;
-  for (const row of packing.rows) {
-    let x = GRAPH_PADDING_X;
-    const rowPlans = [...row.items].sort((left, right) => left.index - right.index);
-    for (const { track, notes, visualizers, noteColumns, declarationHeight, width } of rowPlans) {
-
-      if (!placed.has(track.declaration.name)) {
-        layout[track.declaration.name] = {
-          x,
-          y: y + 18,
-          width: TRACK_WIDTH,
-          height: declarationHeight,
-        };
-        placed.add(track.declaration.name);
-      }
-      notes.forEach((note, index) => {
-        const column = index % noteColumns;
-        const noteRow = Math.floor(index / noteColumns);
-        layout[note.name] = {
-          x: x + NOTE_COLUMN_OFFSET + column * (NOTES_WIDTH + NODE_GAP),
-          y: y + 18 + noteRow * (NOTES_HEIGHT + NODE_GAP),
-          width: NOTES_WIDTH,
-          height: NOTES_HEIGHT,
-        };
-        placed.add(note.name);
-      });
-      let visualY = y + declarationHeight + 30;
-      for (const visualizer of visualizers) {
-        const size = defaultVisualizerSize(visualizer.method);
-        layout[visualizer.id] = { x, y: visualY, ...size };
-        visualY += size.height + NODE_GAP;
-      }
-      x += width + CLUSTER_GAP;
-    }
-    y += row.height + CLUSTER_GAP;
+    .map(({ declaration }) => declaration.name));
+  const nodes = graph.codeNodes.map(({ name }) => (trackNames.has(name)
+    ? { id: name, width: TRACK_WIDTH, height: TRACK_HEIGHT }
+    : { id: name, width: NOTES_WIDTH, height: NOTES_HEIGHT }));
+  for (const visualizer of graph.visualizers) {
+    nodes.push({ id: visualizer.id, ...defaultVisualizerSize(visualizer.method) });
   }
-  return layout;
+  // Graph edges run consumer -> dependency, except visualiser edges, which
+  // run source -> visualiser; flip those so visualisers rank as consumers.
+  const edges = graph.edges.map(({ from, to }) => (to.startsWith('visualizer:')
+    ? { from: to, to: from }
+    : { from, to }));
+  return organicLayout({ nodes, edges, viewportWidth, viewportHeight });
 }
+
 
 function clampPosition(value, minimum = 8) {
   return Math.max(minimum, Math.round(value));
@@ -343,6 +208,8 @@ export function createGraphViewController({
   getSongKey,
   onCodeChange,
   onPlaySection,
+  onSelectSection,
+  getSelectedSectionName,
   onToggleSectionLoop,
 }) {
   const edgeMaskPrefix = `graph-edge-underpass-${graphViewSequence++}`;
@@ -1320,6 +1187,44 @@ export function createGraphViewController({
     renderPerformanceState();
   }
 
+  function paintSectionSegment(entry, { current, cycle, canStartOnDoubleClick }) {
+    const { segment, section: model } = entry;
+    const isCurrent = model.name === current?.name;
+    const isQueued = model.name === performanceState.queuedSection;
+    const isLooped = model.name === performanceState.loopedSection;
+    const progress = isCurrent
+      ? Math.max(0, Math.min(1, (cycle - model.start) / Math.max(1, model.end - model.start)))
+      : 0;
+    const progressValue = `${(progress * 100).toFixed(2)}%`;
+    if (entry.progressValue !== progressValue) {
+      entry.progressValue = progressValue;
+      segment.style.setProperty('--section-progress', progressValue);
+    }
+    const stateKey = `${isCurrent}|${isQueued}|${isLooped}|${canStartOnDoubleClick}`;
+    if (entry.stateKey === stateKey) return;
+    entry.stateKey = stateKey;
+    segment.classList.toggle('is-current', isCurrent);
+    segment.classList.toggle('is-queued', isQueued);
+    segment.classList.toggle('is-looped', isLooped);
+    segment.setAttribute('aria-label', `${segment.dataset.section}${isCurrent ? ', current section' : ''}${isQueued ? ', queued' : ''}${isLooped ? ', looping' : ''}`);
+    const jumpButton = segment.querySelector('.graph-section-jump');
+    jumpButton.setAttribute('aria-current', isCurrent ? 'true' : 'false');
+    jumpButton.setAttribute('aria-label', canStartOnDoubleClick
+      ? `Select ${segment.dataset.section}; double-click to play`
+      : (isQueued
+        ? `Jump to ${segment.dataset.section} now`
+        : `Queue ${segment.dataset.section}${isCurrent ? ', current section' : ''}`));
+    jumpButton.title = canStartOnDoubleClick
+      ? `Click to select ${segment.dataset.section}; double-click to play it`
+      : (isQueued
+        ? `Jump to ${segment.dataset.section} now`
+        : `Play ${segment.dataset.section} after the current section`);
+    const loopButton = segment.querySelector('.graph-section-loop');
+    loopButton.setAttribute('aria-pressed', String(isLooped));
+    loopButton.setAttribute('aria-label', `${isLooped ? 'Stop looping' : 'Loop'} ${segment.dataset.section}`);
+    loopButton.title = `${isLooped ? 'Stop looping' : 'Loop'} ${segment.dataset.section}`;
+  }
+
   function renderPerformanceState() {
     const sections = performanceState.sections || [];
     const signature = sections.map(({ name, start, end }) => `${name}:${start}:${end}`).join('|');
@@ -1344,25 +1249,29 @@ export function createGraphViewController({
         jumpButton.addEventListener('click', (event) => {
           const startNow = event.detail >= 2
             && (!performanceState.playing || performanceState.paused);
-          const next = setSelectedSongSection(getCode(), section.name);
           if (startNow) {
             performanceState = {
               ...performanceState,
               queuedSection: null,
             };
             renderPerformanceState();
-            onPlaySection(next, section.name);
+            onPlaySection(section.name);
             return;
           }
           const jumpNow = performanceState.playing
             && performanceState.queuedSection === section.name;
-          if (!performanceState.playing && next === getCode()) return;
+          if (!performanceState.playing && getSelectedSectionName?.() === section.name) {
+            // Clicking the already-selected section while stopped clears the
+            // selection back to the full song.
+            onSelectSection('Full song');
+            return;
+          }
           performanceState = {
             ...performanceState,
             queuedSection: jumpNow ? null : section.name,
           };
           renderPerformanceState();
-          onCodeChange(next, { immediate: jumpNow, section: section.name });
+          onSelectSection(section.name, { immediate: jumpNow });
         });
 
         const loopButton = document.createElement('button');
@@ -1397,43 +1306,109 @@ export function createGraphViewController({
     // This runs on every 20Hz meter tick during playback; only the current
     // segment's progress actually changes per tick, so skip identical writes.
     for (const entry of sectionSegments) {
-      const { segment, section: model } = entry;
-      const isCurrent = model.name === current?.name;
-      const isQueued = model.name === performanceState.queuedSection;
-      const isLooped = model.name === performanceState.loopedSection;
-      const progress = isCurrent
-        ? Math.max(0, Math.min(1, (cycle - model.start) / Math.max(1, model.end - model.start)))
-        : 0;
-      const progressValue = `${(progress * 100).toFixed(2)}%`;
-      if (entry.progressValue !== progressValue) {
-        entry.progressValue = progressValue;
-        segment.style.setProperty('--section-progress', progressValue);
-      }
-      const stateKey = `${isCurrent}|${isQueued}|${isLooped}|${canStartOnDoubleClick}`;
-      if (entry.stateKey === stateKey) continue;
-      entry.stateKey = stateKey;
-      segment.classList.toggle('is-current', isCurrent);
-      segment.classList.toggle('is-queued', isQueued);
-      segment.classList.toggle('is-looped', isLooped);
-      segment.setAttribute('aria-label', `${segment.dataset.section}${isCurrent ? ', current section' : ''}${isQueued ? ', queued' : ''}${isLooped ? ', looping' : ''}`);
-      const jumpButton = segment.querySelector('.graph-section-jump');
-      jumpButton.setAttribute('aria-current', isCurrent ? 'true' : 'false');
-      jumpButton.setAttribute('aria-label', canStartOnDoubleClick
-        ? `Select ${segment.dataset.section}; double-click to play`
-        : (isQueued
-          ? `Jump to ${segment.dataset.section} now`
-          : `Queue ${segment.dataset.section}${isCurrent ? ', current section' : ''}`));
-      jumpButton.title = canStartOnDoubleClick
-        ? `Click to select ${segment.dataset.section}; double-click to play it`
-        : (isQueued
-          ? `Jump to ${segment.dataset.section} now`
-          : `Play ${segment.dataset.section} after the current section`);
-      const loopButton = segment.querySelector('.graph-section-loop');
-      loopButton.setAttribute('aria-pressed', String(isLooped));
-      loopButton.setAttribute('aria-label', `${isLooped ? 'Stop looping' : 'Loop'} ${segment.dataset.section}`);
-      loopButton.title = `${isLooped ? 'Stop looping' : 'Loop'} ${segment.dataset.section}`;
+      paintSectionSegment(entry, { current, cycle, canStartOnDoubleClick });
     }
     paintArrangementProgress(cycle);
+  }
+
+  function appendEdgeMasks(fragment, underpassCutouts, bridgeOverlayCutouts) {
+    if (underpassCutouts.some((cutouts) => cutouts.length)
+      || bridgeOverlayCutouts.some((cutouts) => cutouts.length)) {
+      const definitions = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+      const appendMask = (id, cutouts) => {
+        const mask = document.createElementNS('http://www.w3.org/2000/svg', 'mask');
+        mask.id = id;
+        mask.setAttribute('maskUnits', 'userSpaceOnUse');
+        mask.setAttribute('maskContentUnits', 'userSpaceOnUse');
+        mask.setAttribute('x', '0');
+        mask.setAttribute('y', '0');
+        mask.setAttribute('width', String(surfaceWidth));
+        mask.setAttribute('height', String(surfaceHeight));
+        const field = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        field.setAttribute('width', String(surfaceWidth));
+        field.setAttribute('height', String(surfaceHeight));
+        field.setAttribute('fill', 'white');
+        mask.appendChild(field);
+        const cutout = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        cutout.setAttribute('d', cutouts.join(' '));
+        cutout.setAttribute('class', 'graph-edge-underpass-cutout');
+        cutout.setAttribute('fill', 'none');
+        cutout.setAttribute('stroke', 'black');
+        cutout.setAttribute('stroke-linecap', 'round');
+        cutout.setAttribute('vector-effect', 'non-scaling-stroke');
+        mask.appendChild(cutout);
+        definitions.appendChild(mask);
+      };
+      underpassCutouts.forEach((cutouts, edgeIndex) => {
+        if (cutouts.length) appendMask(`${edgeMaskPrefix}-${edgeIndex}`, cutouts);
+      });
+      bridgeOverlayCutouts.forEach((cutouts, edgeIndex) => {
+        if (cutouts.length) appendMask(`${edgeMaskPrefix}-bridge-${edgeIndex}`, cutouts);
+      });
+      fragment.appendChild(definitions);
+    }
+  }
+
+  function createEdgePath(edge, route, crossings, cutouts, edgeIndex) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', orthogonalPath(route, crossings));
+    path.setAttribute('class', edge.to.startsWith('visualizer:') ? 'graph-edge graph-visual-edge' : 'graph-edge');
+    if (cutouts.length) {
+      path.setAttribute('mask', `url(#${edgeMaskPrefix}-${edgeIndex})`);
+      path.dataset.underpasses = String(cutouts.length);
+    }
+    path.dataset.edgeId = edge.id;
+    path.dataset.from = edge.from;
+    path.dataset.to = edge.to;
+    path.dataset.route = JSON.stringify(route);
+    path.dataset.crossings = String(crossings.length);
+    return path;
+  }
+
+  function createBridgePath(edge, bridgePaths, cutouts, edgeIndex) {
+    const bridge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    bridge.setAttribute('d', bridgePaths.join(' '));
+    bridge.setAttribute('class', edge.to.startsWith('visualizer:')
+      ? 'graph-edge graph-visual-edge graph-edge-bridge-overlay'
+      : 'graph-edge graph-edge-bridge-overlay');
+    if (cutouts.length) {
+      bridge.setAttribute('mask', `url(#${edgeMaskPrefix}-bridge-${edgeIndex})`);
+      bridge.dataset.underpasses = String(cutouts.length);
+    }
+    bridge.dataset.bridgeEdgeId = edge.id;
+    bridge.dataset.from = edge.from;
+    bridge.dataset.to = edge.to;
+    return bridge;
+  }
+
+  function appendRewirePath(fragment) {
+    const targetElement = nodeElements.get(rewire.model.id);
+    const target = targetElement ? {
+      x: targetElement.offsetLeft,
+      y: targetElement.offsetTop + targetElement.offsetHeight / 2,
+    } : null;
+    if (target) {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', orthogonalPath([
+        rewire.pointer,
+        { x: rewire.pointer.x, y: target.y },
+        target,
+      ]));
+      path.setAttribute('class', 'graph-edge graph-drag-edge');
+      fragment.appendChild(path);
+    }
+  }
+
+  function indexEdgeElements() {
+    const index = new Map();
+    for (const path of edgeLayer.querySelectorAll('.graph-edge')) {
+      const edgeId = path.dataset.edgeId || path.dataset.bridgeEdgeId;
+      if (!edgeId) continue;
+      const elements = index.get(edgeId) || [];
+      elements.push(path);
+      index.set(edgeId, elements);
+    }
+    return index;
   }
 
   function drawEdges() {
@@ -1491,106 +1466,32 @@ export function createGraphViewController({
       interactionPadding: bridgeInteractionPadding,
       cutoutOffset: bridgeCutoutOffset,
     });
-    if (underpassCutouts.some((cutouts) => cutouts.length)
-      || bridgeOverlayCutouts.some((cutouts) => cutouts.length)) {
-      const definitions = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-      const appendMask = (id, cutouts) => {
-        const mask = document.createElementNS('http://www.w3.org/2000/svg', 'mask');
-        mask.id = id;
-        mask.setAttribute('maskUnits', 'userSpaceOnUse');
-        mask.setAttribute('maskContentUnits', 'userSpaceOnUse');
-        mask.setAttribute('x', '0');
-        mask.setAttribute('y', '0');
-        mask.setAttribute('width', String(surfaceWidth));
-        mask.setAttribute('height', String(surfaceHeight));
-        const field = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        field.setAttribute('width', String(surfaceWidth));
-        field.setAttribute('height', String(surfaceHeight));
-        field.setAttribute('fill', 'white');
-        mask.appendChild(field);
-        const cutout = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        cutout.setAttribute('d', cutouts.join(' '));
-        cutout.setAttribute('class', 'graph-edge-underpass-cutout');
-        cutout.setAttribute('fill', 'none');
-        cutout.setAttribute('stroke', 'black');
-        cutout.setAttribute('stroke-linecap', 'round');
-        cutout.setAttribute('vector-effect', 'non-scaling-stroke');
-        mask.appendChild(cutout);
-        definitions.appendChild(mask);
-      };
-      underpassCutouts.forEach((cutouts, edgeIndex) => {
-        if (cutouts.length) appendMask(`${edgeMaskPrefix}-${edgeIndex}`, cutouts);
-      });
-      bridgeOverlayCutouts.forEach((cutouts, edgeIndex) => {
-        if (cutouts.length) appendMask(`${edgeMaskPrefix}-bridge-${edgeIndex}`, cutouts);
-      });
-      fragment.appendChild(definitions);
-    }
+    appendEdgeMasks(fragment, underpassCutouts, bridgeOverlayCutouts);
     for (let edgeIndex = 0; edgeIndex < graph.edges.length; edgeIndex++) {
-      const edge = graph.edges[edgeIndex];
-      const route = routes[edgeIndex];
-      const crossings = crossingsByEdge[edgeIndex];
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', orthogonalPath(route, crossings));
-      path.setAttribute('class', edge.to.startsWith('visualizer:') ? 'graph-edge graph-visual-edge' : 'graph-edge');
-      if (underpassCutouts[edgeIndex].length) {
-        path.setAttribute('mask', `url(#${edgeMaskPrefix}-${edgeIndex})`);
-        path.dataset.underpasses = String(underpassCutouts[edgeIndex].length);
-      }
-      path.dataset.edgeId = edge.id;
-      path.dataset.from = edge.from;
-      path.dataset.to = edge.to;
-      path.dataset.route = JSON.stringify(route);
-      path.dataset.crossings = String(crossings.length);
-      fragment.appendChild(path);
+      fragment.appendChild(createEdgePath(
+        graph.edges[edgeIndex],
+        routes[edgeIndex],
+        crossingsByEdge[edgeIndex],
+        underpassCutouts[edgeIndex],
+        edgeIndex,
+      ));
     }
     for (let edgeIndex = 0; edgeIndex < graph.edges.length; edgeIndex++) {
       if (!bridgePathsByEdge[edgeIndex].length) continue;
-      const edge = graph.edges[edgeIndex];
-      const bridge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      bridge.setAttribute('d', bridgePathsByEdge[edgeIndex].join(' '));
-      bridge.setAttribute('class', edge.to.startsWith('visualizer:')
-        ? 'graph-edge graph-visual-edge graph-edge-bridge-overlay'
-        : 'graph-edge graph-edge-bridge-overlay');
-      if (bridgeOverlayCutouts[edgeIndex].length) {
-        bridge.setAttribute('mask', `url(#${edgeMaskPrefix}-bridge-${edgeIndex})`);
-        bridge.dataset.underpasses = String(bridgeOverlayCutouts[edgeIndex].length);
-      }
-      bridge.dataset.bridgeEdgeId = edge.id;
-      bridge.dataset.from = edge.from;
-      bridge.dataset.to = edge.to;
-      fragment.appendChild(bridge);
+      fragment.appendChild(createBridgePath(
+        graph.edges[edgeIndex],
+        bridgePathsByEdge[edgeIndex],
+        bridgeOverlayCutouts[edgeIndex],
+        edgeIndex,
+      ));
     }
-    if (rewire) {
-      const targetElement = nodeElements.get(rewire.model.id);
-      const target = targetElement ? {
-        x: targetElement.offsetLeft,
-        y: targetElement.offsetTop + targetElement.offsetHeight / 2,
-      } : null;
-      if (target) {
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        path.setAttribute('d', orthogonalPath([
-          rewire.pointer,
-          { x: rewire.pointer.x, y: target.y },
-          target,
-        ]));
-        path.setAttribute('class', 'graph-edge graph-drag-edge');
-        fragment.appendChild(path);
-      }
-    }
+    if (rewire) appendRewirePath(fragment);
     edgeLayer.replaceChildren(fragment);
     edgeLayoutSignature = layoutSignature;
     edgeRenderSignature = renderSignature;
     arrangementPaintSignature = null;
     paintedEdges = new Set();
-    edgeElementsById = new Map();
-    for (const path of edgeLayer.querySelectorAll('.graph-edge')) {
-      const edgeId = path.dataset.edgeId || path.dataset.bridgeEdgeId;
-      if (!edgeId) continue;
-      const elements = edgeElementsById.get(edgeId) || [];
-      elements.push(path);
-      edgeElementsById.set(edgeId, elements);
-    }
+    edgeElementsById = indexEdgeElements();
     paintActivity(lastActivations);
     paintArrangementProgress(performanceState.cycle);
   }
@@ -1605,12 +1506,14 @@ export function createGraphViewController({
     }, 80);
   }
 
-  function paintActivity(activations) {
-    const state = resolveGraphActivity(graph, activations);
+  function paintSoundingNodes(state) {
     for (const [id, element] of nodeElements) {
       const sounding = state.activeNodes.has(id);
       element.classList.toggle('is-sounding', sounding);
     }
+  }
+
+  function paintSoundingEdges(state) {
     for (const [edgeId, elements] of edgeElementsById) {
       const sounding = state.activeEdges.has(edgeId);
       if (sounding === paintedEdges.has(edgeId)) continue;
@@ -1631,15 +1534,19 @@ export function createGraphViewController({
         }
       }
     }
-    // This runs on every activity frame during playback. Diff against the
-    // previously painted tokens instead of clearing every token each frame,
-    // and keep rect reads ahead of scroll writes so layout flushes once.
+  }
+
+  function collectActiveTokens(activations) {
     const nextTokens = new Map();
     for (const activation of activations) {
       for (const token of sourceTokens.get(tokenKey(activation.from, activation.to)) || []) {
         nextTokens.set(token, activation);
       }
     }
+    return nextTokens;
+  }
+
+  function paintTokenActivity(nextTokens) {
     for (const token of paintedTokens.keys()) {
       if (!nextTokens.has(token)) {
         token.classList.remove('is-active-note', 'is-note-onset');
@@ -1662,6 +1569,10 @@ export function createGraphViewController({
       painted.onset = onset;
       painted.color = color;
     }
+    return scrollChecks;
+  }
+
+  function collectScrollWrites(scrollChecks) {
     const scrollWrites = [];
     for (const token of scrollChecks) {
       const wrapper = token.closest('.graph-source-wrap');
@@ -1682,6 +1593,19 @@ export function createGraphViewController({
         });
       }
     }
+    return scrollWrites;
+  }
+
+  function paintActivity(activations) {
+    const state = resolveGraphActivity(graph, activations);
+    paintSoundingNodes(state);
+    paintSoundingEdges(state);
+    // This runs on every activity frame during playback. Diff against the
+    // previously painted tokens instead of clearing every token each frame,
+    // and keep rect reads ahead of scroll writes so layout flushes once.
+    const nextTokens = collectActiveTokens(activations);
+    const scrollChecks = paintTokenActivity(nextTokens);
+    const scrollWrites = collectScrollWrites(scrollChecks);
     for (const write of scrollWrites) {
       write.wrapper.scrollTop += write.top;
       write.wrapper.scrollLeft += write.left;
@@ -2133,6 +2057,13 @@ export function createGraphViewController({
   visualizersToggle.addEventListener('click', handleVisualizersToggle);
   const handleBackgroundToggle = () => setBackgroundMode(cycleBackgroundMode(background.mode));
   backgroundToggle.addEventListener('click', handleBackgroundToggle);
+  const relayoutButton = root.querySelector('.graph-relayout');
+  const handleRelayout = () => {
+    writeLayout(getSongKey(), {});
+    hasCustomScale = false;
+    render();
+  };
+  relayoutButton.addEventListener('click', handleRelayout);
   const handleDocumentPointerDown = (event) => {
     if (!palette.hidden && !palette.contains(event.target) && event.target !== paletteTrigger) {
       closeVisualizerPalette();
@@ -2195,6 +2126,7 @@ export function createGraphViewController({
       palette.remove();
       background.destroy();
       backgroundToggle.removeEventListener('click', handleBackgroundToggle);
+      relayoutButton.removeEventListener('click', handleRelayout);
       document.removeEventListener('pointerdown', handleDocumentPointerDown);
       document.removeEventListener('strood:visualizer-canvas', refreshVisualizerMirrors);
       root.removeEventListener('keydown', handleRootKeydown);

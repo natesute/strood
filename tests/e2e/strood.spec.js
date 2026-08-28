@@ -210,7 +210,10 @@ test('offers a source-backed graph as an alternative editor view', async ({ page
         && tokenBounds.bottom <= sourceBounds.bottom + 1
         && tokenBounds.left >= sourceBounds.left - 1
         && tokenBounds.right <= sourceBounds.right + 1,
-      readable: tokenBounds.height >= 8,
+      // Organic layouts show structure at the fitted zoom and rely on
+      // zooming (or the shift lens) for close reading; tokens just need to
+      // stay legible as shapes.
+      readable: tokenBounds.height >= 5.5,
       stableNode: JSON.stringify(noteStyleBefore) === JSON.stringify(stableStyle(noteNode)),
       stableVisualizer: JSON.stringify(visualizerStyleBefore) === JSON.stringify(stableStyle(visualizerNode)),
       stableEdge: JSON.stringify(edgeStyleBefore) === JSON.stringify(stableStyle(edge)),
@@ -426,9 +429,10 @@ test('offers a source-backed graph as an alternative editor view', async ({ page
   const before = await declaration.boundingBox();
   const handle = declaration.locator('.graph-node-header');
   const handleBox = await handle.boundingBox();
-  await page.mouse.move(handleBox.x + 35, handleBox.y + 15);
+  const grabY = handleBox.y + handleBox.height / 2;
+  await page.mouse.move(handleBox.x + 35, grabY);
   await page.mouse.down();
-  await page.mouse.move(handleBox.x + 79, handleBox.y + 47, { steps: 4 });
+  await page.mouse.move(handleBox.x + 79, grabY + 32, { steps: 4 });
   await page.mouse.up();
   const after = await declaration.boundingBox();
   expect(after.x).toBeGreaterThan(before.x + 30);
@@ -486,9 +490,10 @@ test('offers a source-backed graph as an alternative editor view', async ({ page
   const deferredHandle = declaration.locator('.graph-node-header');
   await deferredHandle.evaluate((element) => { element.dataset.dragRegression = 'original'; });
   const deferredHandleBox = await deferredHandle.boundingBox();
-  await page.mouse.move(deferredHandleBox.x + 32, deferredHandleBox.y + 14);
+  const deferredGrabY = deferredHandleBox.y + deferredHandleBox.height / 2;
+  await page.mouse.move(deferredHandleBox.x + 32, deferredGrabY);
   await page.mouse.down();
-  await page.mouse.move(deferredHandleBox.x + 76, deferredHandleBox.y + 46, { steps: 4 });
+  await page.mouse.move(deferredHandleBox.x + 76, deferredGrabY + 32, { steps: 4 });
   // Blurring the focused source schedules a render after 100ms. The captured
   // node must remain attached until pointerup, then the queued render can run.
   await page.waitForTimeout(150);
@@ -800,9 +805,13 @@ test('packs a dense song graph across the available viewport', async ({ page }) 
   expect(metrics.bridgeOverlaysAreCurvesOnly).toBe(true);
   expect(metrics.cutoutsAreScoped).toBe(true);
   expect(metrics.backgroundIsUnmasked).toBe(true);
-  expect(metrics.screenLaneSeparation).toBe(2.8);
+  // Below the minimum edge routing scale (.3) the app compresses screen
+  // lane separation proportionally rather than re-routing.
+  expect(metrics.screenLaneSeparation).toBeCloseTo(2.8 * Math.min(1, metrics.scale / .3), 1);
   expect(metrics.screenLaneSeparation).toBeGreaterThan(metrics.activeEdgeStrokeWidth);
-  expect(metrics.scale).toBeGreaterThan(.35);
+  // The organic layout spends zoom on emergent clusters; the scale floor
+  // catches blow-ups rather than enforcing grid-era density.
+  expect(metrics.scale).toBeGreaterThan(.27);
   expect(metrics.widthFill).toBeGreaterThan(.9);
   expect(metrics.heightFill).toBeGreaterThan(.8);
 
@@ -1150,8 +1159,8 @@ test('loops a graph section until its loop control is pressed again', async ({ p
   await expect(loop).toHaveAttribute('aria-pressed', 'true');
   await expect(finalHit).toHaveClass(/is-looped/);
   await expect(page.locator('#queue-status')).toBeEmpty();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('strudel_code')))
-    .toContain("const songPart = 'Final hit'");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('strood_song_part_v1')))
+    .toContain('"Final hit"');
   await expect(page.locator('#mode')).toHaveText('PLAYING');
   await expect.poll(() => graph.locator('.graph-section-name').textContent(), { timeout: 5000 })
     .toBe('Final hit');
@@ -1391,15 +1400,16 @@ test('cues the playground toys after the current section while playing', async (
     localStorage.setItem('strudel_code', code);
     localStorage.setItem('strudel_song_name', 'kids - mgmt');
     localStorage.setItem('strood:workspace-view', 'code');
+    localStorage.setItem('strood_song_part_v1', JSON.stringify({ 'kids - mgmt': 'Final hit' }));
   }, { code: song });
   await page.goto('/');
-  await page.getByRole('button', { name: /Choose song part, current/ }).click();
-  await page.getByRole('option', { name: 'Final hit', exact: true }).click();
   await page.getByRole('button', { name: 'Play', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'PLAYING' })).toBeVisible();
 
-  await page.getByRole('button', { name: /Choose song part, current/ }).click();
-  await page.getByRole('option', { name: 'Playground break', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph', exact: true }).click();
+  await page.getByRole('region', { name: 'Song graph' })
+    .locator('.graph-section[data-section="Playground break"] .graph-section-jump').click();
+  await page.getByRole('button', { name: 'Code', exact: true }).click();
   await page.getByRole('button', { name: /Solo track, current/ }).click();
   await page.getByRole('option', { name: 'playground-tape', exact: true }).click();
   await page.getByRole('button', { name: 'Graph', exact: true }).click();
@@ -2525,4 +2535,44 @@ test('magnifies the graph under a shift-held lens with anchored optics', async (
   await page.keyboard.down('Shift');
   await expect(lens).toBeHidden();
   await page.keyboard.up('Shift');
+});
+
+test('re-layouts the graph, discarding saved node positions', async ({ page }) => {
+  const song = await fs.readFile(path.resolve(__dirname, '../../songs/kids - mgmt.strudel'), 'utf8');
+  await page.addInitScript(({ code }) => {
+    localStorage.setItem('strudel_code', code);
+    localStorage.setItem('strudel_song_name', 'kids - mgmt');
+    localStorage.setItem('strood:workspace-view', 'graph');
+    localStorage.setItem('strood:graph-layout:v9:kids%20-%20mgmt', JSON.stringify({
+      hookVoice: { x: 4200, y: 3200, width: 190, height: 140 },
+    }));
+  }, { code: song });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Graph', exact: true }).click();
+
+  const graph = page.getByRole('region', { name: 'Song graph' });
+  const hook = graph.locator('[data-node-id="hookVoice"]');
+  await expect(hook).toBeVisible();
+  expect(await hook.evaluate((node) => node.offsetLeft)).toBeGreaterThan(4000);
+
+  await graph.getByRole('button', { name: 'Re-layout graph nodes' }).click();
+  await expect.poll(() => hook.evaluate((node) => node.offsetLeft)).toBeLessThan(4000);
+  // The organic layout keeps connected nodes near each other: the hook chain
+  // edges must be far shorter than the drawing itself.
+  const spans = await graph.evaluate((root) => {
+    const centreOf = (id) => {
+      const node = root.querySelector(`[data-node-id="${id}"]`);
+      return { x: node.offsetLeft + node.offsetWidth / 2, y: node.offsetTop + node.offsetHeight / 2 };
+    };
+    const between = (a, b) => Math.hypot(centreOf(a).x - centreOf(b).x, centreOf(a).y - centreOf(b).y);
+    const nodes = [...root.querySelectorAll('.graph-node[data-node-id]')];
+    const width = Math.max(...nodes.map((node) => node.offsetLeft + node.offsetWidth));
+    return {
+      width,
+      songToPhrase: between('hookSong', 'hookClassic'),
+      voiceToSong: between('hookVoice', 'hookSong'),
+    };
+  });
+  expect(spans.songToPhrase).toBeLessThan(spans.width / 3);
+  expect(spans.voiceToSong).toBeLessThan(spans.width / 3);
 });

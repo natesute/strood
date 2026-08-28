@@ -5,7 +5,6 @@ import {
   parseSections,
   sectionEndTiming,
   sectionAtCycle,
-  setSelectedSongSection,
   selectedSongSection,
 } from '../src/song-metadata.js';
 import { requiredLocalSampleUrls, requiredSamplePacks } from '../src/sample-loader.js';
@@ -58,8 +57,6 @@ const arrangement = [
     expect(selectedSongSection(code)).toEqual({ name: 'Verse one', start: 8 });
     expect(selectedSongSection(code.replace('Verse one\'\n', 'Full song\'\n')))
       .toEqual({ name: 'Full song', start: 0 });
-    expect(setSelectedSongSection(code, 'Opening hook'))
-      .toContain("const songPart = 'Opening hook'");
   });
 
   it('calculates the next cycle boundary', () => {
@@ -143,20 +140,6 @@ const settings = { gain: 1.05, pan: .4, mute: false }`;
     const controls = findInlineControls("const arrangement = [{ section: 'Intro', cycles: 8 }]");
     expect(controls).toContainEqual(expect.objectContaining({
       type: 'number', name: 'cycles', value: '8', min: 1, max: 64, step: 1,
-    }));
-  });
-
-  it('turns the selected song part into a section dropdown', () => {
-    const code = `const songPart = 'Verse one'
-const arrangement = [
-  { section: 'Opening hook', cycles: 8 },
-  { section: 'Verse one', cycles: 16 },
-]`;
-    expect(findInlineControls(code)).toContainEqual(expect.objectContaining({
-      type: 'choice',
-      name: 'songPart',
-      value: 'Verse one',
-      options: ['Full song', 'Opening hook', 'Verse one'],
     }));
   });
 

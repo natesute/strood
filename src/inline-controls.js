@@ -1,6 +1,5 @@
 import { Prec, StateField } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType } from '@codemirror/view';
-import { parseSections } from './song-metadata.js';
 import { parseTracks } from './tracks.js';
 
 const NUMBER = '-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)';
@@ -150,22 +149,6 @@ export function findInlineControls(code) {
     });
   }
 
-  const songPart = /\bconst\s+songPart\s*=\s*(["'])(.*?)\1/g;
-  const sectionNames = parseSections(code).map(({ name }) => name);
-  for (const match of code.matchAll(songPart)) {
-    const quoted = `${match[1]}${match[2]}${match[1]}`;
-    const from = match.index + match[0].indexOf(quoted);
-    controls.push({
-      type: 'choice',
-      name: 'songPart',
-      value: match[2],
-      quote: match[1],
-      from,
-      to: from + quoted.length,
-      options: ['Full song', ...sectionNames],
-    });
-  }
-
   const booleans = /\b(mute|enabled|bypass)\s*:\s*(true|false)\b/g;
   for (const match of code.matchAll(booleans)) {
     const from = match.index + match[0].lastIndexOf(match[2]);
@@ -191,30 +174,43 @@ function compactNumber(value) {
   return Number(Number(value).toFixed(2)).toString();
 }
 
+function formatPan(number) {
+  if (Math.abs(number - 0.5) < 0.005) return 'centre';
+  const direction = number < 0.5 ? 'left' : 'right';
+  return `${Math.round(Math.abs(number - 0.5) * 200)}% ${direction}`;
+}
+
+const hertz = (number) => `${Math.round(number)} Hz`;
+const percentOf = (label) => (number) => `${Math.round(number * 100)}% ${label}`;
+const level = (number) => `${compactNumber(number)}× level`;
+const seconds = (number) => (number < 1
+  ? `${Math.round(number * 1000)} ms`
+  : `${compactNumber(number)} s`);
+
+const CONTEXTUAL_FORMATS = {
+  lpf: hertz,
+  hpf: hertz,
+  pan: formatPan,
+  master: percentOf('master'),
+  room: percentOf('room'),
+  clip: percentOf('clip'),
+  shape: percentOf('shape'),
+  release: seconds,
+  attack: seconds,
+  gain: level,
+  velocity: level,
+  postgain: level,
+  size: (number) => `room size ${compactNumber(number)}`,
+  lpq: (number) => `Q ${compactNumber(number)}`,
+  orbit: (number) => `orbit ${Math.round(number)}`,
+  cycles: (number) => `${Math.round(number)} cycle${Math.round(number) === 1 ? '' : 's'}`,
+};
+
 export function formatContextualValue(name, value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return String(value);
-  if (name === 'lpf' || name === 'hpf') return `${Math.round(number)} Hz`;
-  if (name === 'pan') {
-    if (Math.abs(number - 0.5) < 0.005) return 'centre';
-    const direction = number < 0.5 ? 'left' : 'right';
-    return `${Math.round(Math.abs(number - 0.5) * 200)}% ${direction}`;
-  }
-  if (name === 'master') return `${Math.round(number * 100)}% master`;
-  if (name === 'room') return `${Math.round(number * 100)}% room`;
-  if (name === 'clip') return `${Math.round(number * 100)}% clip`;
-  if (name === 'shape') return `${Math.round(number * 100)}% shape`;
-  if (name === 'release' || name === 'attack') {
-    return number < 1 ? `${Math.round(number * 1000)} ms` : `${compactNumber(number)} s`;
-  }
-  if (name === 'gain' || name === 'velocity' || name === 'postgain') {
-    return `${compactNumber(number)}× level`;
-  }
-  if (name === 'size') return `room size ${compactNumber(number)}`;
-  if (name === 'lpq') return `Q ${compactNumber(number)}`;
-  if (name === 'orbit') return `orbit ${Math.round(number)}`;
-  if (name === 'cycles') return `${Math.round(number)} cycle${Math.round(number) === 1 ? '' : 's'}`;
-  return compactNumber(number);
+  const format = Object.hasOwn(CONTEXTUAL_FORMATS, name) ? CONTEXTUAL_FORMATS[name] : null;
+  return format ? format(number) : compactNumber(number);
 }
 
 function uniqueOptions(current, options) {
@@ -501,6 +497,23 @@ const numberScrubbing = EditorView.domEventHandlers({
   },
 });
 
+function steppingDirection(key) {
+  if (['ArrowRight', 'ArrowUp'].includes(key)) return 1;
+  if (['ArrowLeft', 'ArrowDown'].includes(key)) return -1;
+  return 0;
+}
+
+/** Range and step for a stepped number, from the selected control or the widget's dataset. */
+function steppingBounds(control, target) {
+  return {
+    from: control?.from ?? Number(target.dataset.smartFrom),
+    to: control?.to ?? Number(target.dataset.smartTo),
+    min: control?.min ?? Number(target.dataset.smartMin),
+    max: control?.max ?? Number(target.dataset.smartMax),
+    baseStep: control?.step ?? Number(target.dataset.smartStep),
+  };
+}
+
 const numberKeyboardStepping = EditorView.domEventHandlers({
   keydown(event, view) {
     if (!(event.target instanceof Element)) return false;
@@ -509,15 +522,10 @@ const numberKeyboardStepping = EditorView.domEventHandlers({
     const selectedControl = !target && findInlineControls(view.state.doc.toString()).find((control) =>
       control.type === 'number' && selection.from >= control.from && selection.to <= control.to);
     if ((!target || !view.dom.contains(target)) && !selectedControl) return false;
-    const direction = ['ArrowRight', 'ArrowUp'].includes(event.key) ? 1
-      : (['ArrowLeft', 'ArrowDown'].includes(event.key) ? -1 : 0);
+    const direction = steppingDirection(event.key);
     if (!direction) return false;
 
-    const from = selectedControl?.from ?? Number(target.dataset.smartFrom);
-    const to = selectedControl?.to ?? Number(target.dataset.smartTo);
-    const min = selectedControl?.min ?? Number(target.dataset.smartMin);
-    const max = selectedControl?.max ?? Number(target.dataset.smartMax);
-    const baseStep = selectedControl?.step ?? Number(target.dataset.smartStep);
+    const { from, to, min, max, baseStep } = steppingBounds(selectedControl, target);
     const original = view.state.doc.sliceString(from, to);
     const multiplier = event.altKey ? 10 : (event.shiftKey ? 0.2 : 1);
     const step = baseStep * multiplier;

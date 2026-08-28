@@ -45,7 +45,6 @@ import {
   parseSections,
   sectionEndTiming,
   sectionAtCycle,
-  setSelectedSongSection,
   selectedSongSection,
 } from './src/song-metadata.js';
 import { loadSamplePacks } from './src/sample-loader.js';
@@ -295,6 +294,7 @@ function schedulerCycle() {
 let cachedSectionSource = null;
 let cachedSections = [];
 let cachedSelectionSource = null;
+let cachedSelectionName = null;
 let cachedSelection = null;
 
 function sectionsFor(source) {
@@ -305,10 +305,49 @@ function sectionsFor(source) {
   return cachedSections;
 }
 
-function selectionFor(source) {
-  if (source !== cachedSelectionSource) {
+/* Section selection is app state (per song, in localStorage), not song text —
+   picking a section must never dirty the document. The `const songPart` line
+   in older songs is read once as a seed and never written back. */
+const SONG_PART_STORE = 'strood_song_part_v1';
+let selectedSectionName = null;
+let lastEvaluatedSectionName = null;
+
+function readStoredSongParts() {
+  try {
+    const value = JSON.parse(localStorage.getItem(SONG_PART_STORE) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function songPartKey() {
+  return currentSongName || 'Untitled';
+}
+
+function setSelectedSectionName(name) {
+  selectedSectionName = name || null;
+  const store = readStoredSongParts();
+  if (selectedSectionName) store[songPartKey()] = selectedSectionName;
+  else delete store[songPartKey()];
+  try { localStorage.setItem(SONG_PART_STORE, JSON.stringify(store)); } catch {}
+}
+
+function initSelectedSection(code) {
+  const store = readStoredSongParts();
+  const key = songPartKey();
+  selectedSectionName = Object.hasOwn(store, key)
+    ? store[key] || null
+    : selectedSongSection(code)?.name || null;
+}
+
+function selectedSectionIn(source) {
+  if (!selectedSectionName) return null;
+  if (selectedSectionName === 'Full song') return { name: 'Full song', start: 0 };
+  if (source !== cachedSelectionSource || selectedSectionName !== cachedSelectionName) {
     cachedSelectionSource = source;
-    cachedSelection = selectedSongSection(source);
+    cachedSelectionName = selectedSectionName;
+    cachedSelection = parseSections(source).find(({ name }) => name === selectedSectionName) || null;
   }
   return cachedSelection;
 }
@@ -318,7 +357,7 @@ function graphPerformanceSnapshot() {
   const source = lastEvalCode || currentCode;
   const sections = sectionsFor(source);
   const totalCycles = Math.max(0, ...sections.map(({ end }) => end));
-  const selected = selectionFor(currentCode);
+  const selected = selectedSectionIn(currentCode);
   let cycle = selected?.start || 0;
   if (isPlaying) {
     const elapsed = Math.max(0, schedulerCycle() - playbackSchedulerCycle);
@@ -671,14 +710,10 @@ function stopPlayback() {
   editor.stop();
 }
 
-async function performEvaluation(allCode, autostart) {
-  const evalToken = evalGeneration;
-  let visualizerGeneration = null;
-  const previousEvalCode = lastEvalCode;
-  const previousActiveLoop = activeLoopedSectionName;
+/** Work out which section the next evaluation starts from and whether the timeline recues. */
+function planEvaluationCue(allCode, autostart) {
   const sections = parseSections(allCode);
-  const selectedSection = selectedSongSection(allCode);
-  const previousSection = selectedSongSection(previousEvalCode);
+  const selectedSection = selectedSectionIn(allCode);
   const loopedSection = sections.find(({ name }) => name === loopedSectionName) || null;
   const loopChanged = loopedSectionName !== activeLoopedSectionName;
   const hasPendingCue = Number.isFinite(pendingCueStartCycle);
@@ -690,10 +725,26 @@ async function performEvaluation(allCode, autostart) {
   const shouldCueTimeline = Boolean(selectedSection && (
     (autostart && !isPlaying) ||
     lastEvaluatedSongName !== currentSongName ||
-    selectedSection.name !== previousSection?.name ||
+    selectedSection.name !== lastEvaluatedSectionName ||
     loopChanged ||
     hasPendingCue
   ));
+  return { selectedSection, loopedSection, cueStart, loopCueCycle, loopOffset, shouldCueTimeline };
+}
+
+async function performEvaluation(allCode, autostart) {
+  const evalToken = evalGeneration;
+  let visualizerGeneration = null;
+  const previousEvalCode = lastEvalCode;
+  const previousActiveLoop = activeLoopedSectionName;
+  const {
+    selectedSection,
+    loopedSection,
+    cueStart,
+    loopCueCycle,
+    loopOffset,
+    shouldCueTimeline,
+  } = planEvaluationCue(allCode, autostart);
   if (shouldCueTimeline) songCueTimeline += 1;
   lastEvalCode = allCode;
   clearDiagnostic();
@@ -741,6 +792,7 @@ async function performEvaluation(allCode, autostart) {
     pendingCueSchedulerCycle = null;
     queuedSectionName = null;
     lastEvaluatedSongName = currentSongName;
+    lastEvaluatedSectionName = selectedSection?.name ?? null;
     editorsContainer.dataset.evaluatedLength = String(allCode.length);
     if (getAllCode() === allCode) {
       flashCommittedLines();
@@ -774,6 +826,82 @@ async function performEvaluation(allCode, autostart) {
   }
 }
 
+function cueSectionFor(allCode, cueSectionName) {
+  return cueSectionName
+    ? parseSections(allCode).find(({ name }) => name === cueSectionName)
+    : null;
+}
+
+function activeLoopSection(allCode) {
+  return parseSections(lastEvalCode || allCode)
+    .find(({ name }) => name === activeLoopedSectionName);
+}
+
+/** Decide when a queued update lands: the end of the playing section, or the next cycle. */
+function queuedUpdateTiming(allCode, cueSectionName, finishCurrentSection) {
+  const scheduler = editor.repl.scheduler;
+  const now = Number(scheduler.now());
+  const cps = Number(scheduler.cps) || 1;
+  const selected = selectedSectionIn(allCode);
+  const performance = graphPerformanceSnapshot();
+  // Selecting the section that is already playing (e.g. looping it in place)
+  // is not a jump — only a selection pointing somewhere else queues one.
+  const sectionSelectionChanged = (selected?.name ?? null) !== lastEvaluatedSectionName
+    && selected?.name !== performance.currentSection?.name;
+  const waitsForSectionEnd = finishCurrentSection || Boolean(cueSectionName) || sectionSelectionChanged;
+  const currentPlaybackSection = waitsForSectionEnd ? performance.currentSection : null;
+  const timing = currentPlaybackSection
+    ? sectionEndTiming(now, cps, currentPlaybackSection, performance.cycle)
+    : nextCycleTiming(now, cps, -12);
+  return { timing, currentPlaybackSection, selected, sectionSelectionChanged };
+}
+
+function queueEvaluation(allCode, autostart, options) {
+  const { cueSectionName, cueStartCycle, preserveLoopPosition, finishCurrentSection } = options;
+  const { timing, currentPlaybackSection, selected, sectionSelectionChanged } =
+    queuedUpdateTiming(allCode, cueSectionName, finishCurrentSection);
+  const activeLoop = activeLoopSection(allCode);
+  clearQueuedUpdate();
+  queuedSectionName = cueSectionName || (sectionSelectionChanged ? selected?.name || null : null);
+  const cueSection = cueSectionFor(allCode, cueSectionName);
+  if (Number.isFinite(cueStartCycle)) pendingCueStartCycle = cueStartCycle;
+  else if (cueSection && !preserveLoopPosition) pendingCueStartCycle = cueSection.start;
+  if (preserveLoopPosition && activeLoop) {
+    pendingCueStartCycle = cycleWithinSection(
+      activeLoop,
+      timing.targetCycle - playbackSchedulerCycle,
+    );
+  }
+  queuedTargetCycle = timing.targetCycle;
+  pendingCueSchedulerCycle = currentPlaybackSection ? timing.targetCycle : null;
+  queueStatusEl.textContent = '';
+  document.body.dataset.updateState = 'queued';
+  queuedUpdateTimer = window.setTimeout(() => {
+    queuedUpdateTimer = 0;
+    queuedTargetCycle = null;
+    queueStatusEl.textContent = '';
+    performEvaluation(getAllCode(), autostart).catch(() => {});
+  }, timing.milliseconds);
+  updateMode();
+}
+
+function applyImmediateCue(allCode, { cueSectionName, cueStartCycle, preserveLoopPosition }) {
+  const cueSection = cueSectionFor(allCode, cueSectionName);
+  if (Number.isFinite(cueStartCycle)) {
+    pendingCueStartCycle = cueStartCycle;
+    pendingCueSchedulerCycle = schedulerCycle();
+  } else if (cueSection && !preserveLoopPosition) pendingCueStartCycle = cueSection.start;
+  if (preserveLoopPosition && activeLoopedSectionName) {
+    const activeLoop = activeLoopSection(allCode);
+    if (activeLoop) {
+      pendingCueStartCycle = cycleWithinSection(
+        activeLoop,
+        schedulerCycle() - playbackSchedulerCycle,
+      );
+    }
+  }
+}
+
 async function evaluateAll(
   autostart = true,
   {
@@ -786,65 +914,13 @@ async function evaluateAll(
 ) {
   const allCode = getAllCode();
   saveRecoverySnapshot(currentSongName, allCode, 'run');
+  const cue = { cueSectionName, cueStartCycle, preserveLoopPosition };
   if (isPlaying && !immediate) {
-    const scheduler = editor.repl.scheduler;
-    const now = Number(scheduler.now());
-    const cps = Number(scheduler.cps) || 1;
-    const selected = selectedSongSection(allCode);
-    const current = selectedSongSection(lastEvalCode);
-    const performance = graphPerformanceSnapshot();
-    const sectionSelectionChanged = selected?.name !== current?.name;
-    const waitsForSectionEnd = finishCurrentSection || Boolean(cueSectionName) || sectionSelectionChanged;
-    const currentPlaybackSection = waitsForSectionEnd ? performance.currentSection : null;
-    const timing = currentPlaybackSection
-      ? sectionEndTiming(now, cps, currentPlaybackSection, performance.cycle)
-      : nextCycleTiming(now, cps, -12);
-    const activeLoop = parseSections(lastEvalCode || allCode)
-      .find(({ name }) => name === activeLoopedSectionName);
-    clearQueuedUpdate();
-    queuedSectionName = cueSectionName || (selected?.name !== current?.name ? selected?.name || null : null);
-    const cueSection = cueSectionName
-      ? parseSections(allCode).find(({ name }) => name === cueSectionName)
-      : null;
-    if (Number.isFinite(cueStartCycle)) pendingCueStartCycle = cueStartCycle;
-    else if (cueSection && !preserveLoopPosition) pendingCueStartCycle = cueSection.start;
-    if (preserveLoopPosition && activeLoop) {
-      pendingCueStartCycle = cycleWithinSection(
-        activeLoop,
-        timing.targetCycle - playbackSchedulerCycle,
-      );
-    }
-    queuedTargetCycle = timing.targetCycle;
-    pendingCueSchedulerCycle = currentPlaybackSection ? timing.targetCycle : null;
-    queueStatusEl.textContent = '';
-    document.body.dataset.updateState = 'queued';
-    queuedUpdateTimer = window.setTimeout(() => {
-      queuedUpdateTimer = 0;
-      queuedTargetCycle = null;
-      queueStatusEl.textContent = '';
-      performEvaluation(getAllCode(), autostart).catch(() => {});
-    }, timing.milliseconds);
-    updateMode();
+    queueEvaluation(allCode, autostart, { ...cue, finishCurrentSection });
     return;
   }
   clearQueuedUpdate();
-  const cueSection = cueSectionName
-    ? parseSections(allCode).find(({ name }) => name === cueSectionName)
-    : null;
-  if (Number.isFinite(cueStartCycle)) {
-    pendingCueStartCycle = cueStartCycle;
-    pendingCueSchedulerCycle = schedulerCycle();
-  } else if (cueSection && !preserveLoopPosition) pendingCueStartCycle = cueSection.start;
-  if (preserveLoopPosition && activeLoopedSectionName) {
-    const activeLoop = parseSections(lastEvalCode || allCode)
-      .find(({ name }) => name === activeLoopedSectionName);
-    if (activeLoop) {
-      pendingCueStartCycle = cycleWithinSection(
-        activeLoop,
-        schedulerCycle() - playbackSchedulerCycle,
-      );
-    }
-  }
+  applyImmediateCue(allCode, cue);
   await performEvaluation(allCode, autostart);
 }
 
@@ -976,7 +1052,7 @@ function toggleSectionLoop(sectionName) {
     const preserveCurrentPosition = isPlaying && performance.currentSection?.name === sectionName;
     loopedSectionName = sectionName;
     clearQueuedUpdate();
-    replaceAllCode(setSelectedSongSection(getAllCode(), sectionName));
+    setSelectedSectionName(sectionName);
     pauseRequested = false;
     evaluateAll(true, {
       immediate: !preserveCurrentPosition,
@@ -1033,16 +1109,28 @@ function graphControllerOptions() {
         }).catch(() => {});
       } else syncGraphPerformance();
     },
-    onPlaySection: (code, section) => {
+    onPlaySection: (section) => {
       if (loopedSectionName) loopedSectionName = null;
       clearQueuedUpdate();
-      replaceAllCode(code);
+      setSelectedSectionName(section);
       pauseRequested = false;
       evaluateAll(true, {
         immediate: true,
         cueSectionName: section,
       }).catch(showDiagnostic);
     },
+    onSelectSection: (section, { immediate = false } = {}) => {
+      if (loopedSectionName) loopedSectionName = null;
+      setSelectedSectionName(section);
+      if (isPlaying) {
+        evaluateAll(true, {
+          immediate,
+          cueSectionName: section === 'Full song' ? null : section,
+          finishCurrentSection: section !== 'Full song',
+        }).catch(() => {});
+      } else syncGraphPerformance();
+    },
+    getSelectedSectionName: () => selectedSectionName,
     onToggleSectionLoop: toggleSectionLoop,
   };
 }
@@ -1165,18 +1253,8 @@ function spawnRipple(scroller, x, y, color, gain) {
   if (!rippleRAF) rippleRAF = requestAnimationFrame(drawRipples);
 }
 
-function drawRipples() {
-  rippleRAF = 0;
-  if (editorsContainer.hidden) {
-    activeRipples.length = 0;
-    for (const { canvas, ctx, w, h } of rippleCanvases.values()) {
-      ctx.clearRect(0, 0, w || canvas.width, h || canvas.height);
-    }
-    return;
-  }
-  const now = performance.now();
-
-  // Group ripples by scroller, prune expired (swap-remove: O(1) per removal)
+/** Group ripples by scroller, prune expired (swap-remove: O(1) per removal) */
+function groupRipplesByScroller(now) {
   _byScroller.clear();
   let i = 0;
   while (i < activeRipples.length) {
@@ -1190,79 +1268,101 @@ function drawRipples() {
     _byScroller.get(r.scroller).push(r);
     i++;
   }
+  return _byScroller;
+}
+
+/**
+ * Cull ripples outside the scroller viewport and batch the rest by
+ * color+lineWidth to minimise canvas state changes.
+ */
+function batchRipplesByStyle(scroller, ripples, now) {
+  // Visible region for culling
+  const vx0 = scroller.scrollLeft - 150;
+  const vy0 = scroller.scrollTop - 150;
+  const vx1 = vx0 + scroller.clientWidth + 300;
+  const vy1 = vy0 + scroller.clientHeight + 300;
+
+  const colorGroups = new Map(); // "color|lineWidth" -> [{x,y,radius,opacity}]
+  for (const r of ripples) {
+    if (r.x < vx0 || r.x > vx1 || r.y < vy0 || r.y > vy1) continue;
+
+    const t = (now - r.startTime) / RIPPLE_DURATION; // 0→1
+    const opacity = 0.4 * (1 - t);
+    if (opacity < 0.02) continue; // skip near-invisible ripples
+
+    const g = Math.max(0.1, Math.min(r.gain, 1.5));
+    const maxSize = 30 + g * 80;
+    const scale = 0.3 + t * 1.2; // 0.3→1.5
+    const radius = (maxSize / 2) * scale;
+    const border = (4 + g * 4) * (1 - t * 0.5);
+    const lw = border | 0; // quantise lineWidth to int for better batching
+    const key = r.color + '|' + lw;
+
+    let group = colorGroups.get(key);
+    if (!group) { group = { color: r.color, lw, items: [] }; colorGroups.set(key, group); }
+    group.items.push({
+      x: r.x - scroller.scrollLeft,
+      y: r.y - scroller.scrollTop,
+      radius,
+      opacity,
+    });
+  }
+  return colorGroups;
+}
+
+/** Draw each batch: one beginPath + multiple arcs per stroke call */
+function strokeRippleBatches(ctx, colorGroups) {
+  for (const { color, lw, items } of colorGroups.values()) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+
+    // Sub-batch by similar opacity (quantised to 0.05 steps)
+    const opacityBuckets = new Map(); // quantised opacity -> [items]
+    for (const item of items) {
+      const qo = Math.round(item.opacity * 20) / 20;
+      let bucket = opacityBuckets.get(qo);
+      if (!bucket) { bucket = []; opacityBuckets.set(qo, bucket); }
+      bucket.push(item);
+    }
+
+    for (const [qo, bucket] of opacityBuckets) {
+      ctx.globalAlpha = qo;
+      ctx.beginPath();
+      for (const item of bucket) {
+        ctx.moveTo(item.x + item.radius, item.y);
+        ctx.arc(item.x, item.y, item.radius, 0, Math.PI * 2);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawRipples() {
+  rippleRAF = 0;
+  if (editorsContainer.hidden) {
+    activeRipples.length = 0;
+    for (const { canvas, ctx, w, h } of rippleCanvases.values()) {
+      ctx.clearRect(0, 0, w || canvas.width, h || canvas.height);
+    }
+    return;
+  }
+  const now = performance.now();
+  const byScroller = groupRipplesByScroller(now);
 
   // Draw ripples — canvas covers full scroll extent, only draw near viewport
-  for (const [scroller, ripples] of _byScroller) {
+  for (const [scroller, ripples] of byScroller) {
     const entry = rippleCanvases.get(scroller);
     if (!entry) continue;
     syncCanvasSize(scroller, entry);
     const ctx = entry.ctx;
     ctx.clearRect(0, 0, entry.w, entry.h);
-
-    // Visible region for culling
-    const vx0 = scroller.scrollLeft - 150;
-    const vy0 = scroller.scrollTop - 150;
-    const vx1 = vx0 + scroller.clientWidth + 300;
-    const vy1 = vy0 + scroller.clientHeight + 300;
-
-    // Batch ripples by color+lineWidth to minimise state changes
-    // Sort by color key so same-color ripples are grouped
-    const colorGroups = new Map(); // "color|lineWidth" -> [{x,y,radius,opacity}]
-    for (const r of ripples) {
-      if (r.x < vx0 || r.x > vx1 || r.y < vy0 || r.y > vy1) continue;
-
-      const t = (now - r.startTime) / RIPPLE_DURATION; // 0→1
-      const opacity = 0.4 * (1 - t);
-      if (opacity < 0.02) continue; // skip near-invisible ripples
-
-      const g = Math.max(0.1, Math.min(r.gain, 1.5));
-      const maxSize = 30 + g * 80;
-      const scale = 0.3 + t * 1.2; // 0.3→1.5
-      const radius = (maxSize / 2) * scale;
-      const border = (4 + g * 4) * (1 - t * 0.5);
-      const lw = border | 0; // quantise lineWidth to int for better batching
-      const key = r.color + '|' + lw;
-
-      let group = colorGroups.get(key);
-      if (!group) { group = { color: r.color, lw, items: [] }; colorGroups.set(key, group); }
-      group.items.push({
-        x: r.x - scroller.scrollLeft,
-        y: r.y - scroller.scrollTop,
-        radius,
-        opacity,
-      });
-    }
-
-    // Draw each batch: one beginPath + multiple arcs per stroke call
-    for (const { color, lw, items } of colorGroups.values()) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = lw;
-
-      // Sub-batch by similar opacity (quantised to 0.05 steps)
-      const opacityBuckets = new Map(); // quantised opacity -> [items]
-      for (const item of items) {
-        const qo = Math.round(item.opacity * 20) / 20;
-        let bucket = opacityBuckets.get(qo);
-        if (!bucket) { bucket = []; opacityBuckets.set(qo, bucket); }
-        bucket.push(item);
-      }
-
-      for (const [qo, bucket] of opacityBuckets) {
-        ctx.globalAlpha = qo;
-        ctx.beginPath();
-        for (const item of bucket) {
-          ctx.moveTo(item.x + item.radius, item.y);
-          ctx.arc(item.x, item.y, item.radius, 0, Math.PI * 2);
-        }
-        ctx.stroke();
-      }
-    }
-    ctx.globalAlpha = 1;
+    strokeRippleBatches(ctx, batchRipplesByStyle(scroller, ripples, now));
   }
 
   // Clear canvases that had ripples last frame but don't now
   for (const [scroller, entry] of rippleCanvases) {
-    if (!_byScroller.has(scroller)) {
+    if (!byScroller.has(scroller)) {
       const ctx = entry.ctx;
       ctx.clearRect(0, 0, entry.w, entry.h);
     }
@@ -1506,83 +1606,49 @@ function playbackMarkColor(hap, nowMs) {
     : (hap.value?.color ?? 'var(--foreground)');
 }
 
-editor.highlight = function (haps, time) {
-  const nowMs = performance.now();
-  const graphVisible = graphPlaybackView && !graphPlaybackView.hidden;
-  const editorHighlightDue = nowMs - lastHighlightTime >= HIGHLIGHT_INTERVAL;
-
-  if (graphVisible) {
-    // Skipped frames leave lastGraphCycleTime untouched, so the next
-    // processed frame's onset window still covers the gap.
-    if (nowMs - lastGraphActivityTime < GRAPH_ACTIVITY_INTERVAL) return;
-    lastGraphActivityTime = nowMs;
-    const graphMusicalHaps = musicalHapsFrom(graphHapsForFrame(haps, time));
-    updateOnsets(graphMusicalHaps, nowMs);
-    dispatchGraphActivity(graphMusicalHaps, time, nowMs);
-    return;
-  }
-
-  lastGraphCycleTime = null;
-  if (!editorHighlightDue) return;
-  lastHighlightTime = nowMs;
-  const musicalHaps = musicalHapsFrom(haps);
-  updateOnsets(musicalHaps, nowMs);
-
-  if (nowMs < playbackScrollGuardUntil) return;
-
-  // CodeMirror only needs decorations for source locations currently on screen.
-  // Filtering here prevents dense off-screen tracks from rebuilding decoration sets.
-  const visibleRanges = editor.editor.visibleRanges;
+/**
+ * CodeMirror only needs decorations for source locations currently on screen.
+ * Filtering here prevents dense off-screen tracks from rebuilding decoration sets.
+ */
+function hapsInVisibleRanges(haps, visibleRanges) {
   const visibleHaps = [];
-  for (const hap of musicalHaps) {
+  for (const hap of haps) {
     const locations = hap.context?.locations;
     if (!locations?.length) continue;
     if (locations.some((loc) => visibleRanges.some((range) => loc.end >= range.from && loc.start <= range.to))) {
       visibleHaps.push(hap);
     }
   }
+  return visibleHaps;
+}
 
-  // Every playback mark is a flat solid block with white text. Onsets briefly
-  // use a white background, then the block takes the event colour.
-  const mixedHaps = visibleHaps.map((hap) => {
+/** Playback decorations for one secondary editor, clipped to its document and viewport */
+function secondaryHighlightMarks(view, haps, nowMs) {
+  const docLen = view.state.doc.length;
+  const secRanges = view.visibleRanges;
+  const marks = [];
+  for (const originalHap of haps) {
+    const hap = filterMusicalLocations(originalHap);
+    if (!hap.context?.locations || !hap.whole) continue;
     const color = playbackMarkColor(hap, nowMs);
-    return { ...hap, value: { ...hap.value, color, markcss: solidPlaybackMark(color) } };
-  });
-  _origHighlight(mixedHaps, time);
-
-  // Distribute highlights to secondary editors
-  if (currentCols > 1 && secondaryEditors.length > 0) {
-    for (let i = 0; i < secondaryEditors.length; i++) {
-      const sec = secondaryEditors[i];
-      const docLen = sec.view.state.doc.length;
-      const secRanges = sec.view.visibleRanges;
-      const marks = [];
-      for (const originalHap of haps) {
-        const hap = filterMusicalLocations(originalHap);
-        if (!hap.context?.locations || !hap.whole) continue;
-        const color = playbackMarkColor(hap, nowMs);
-        const style = solidPlaybackMark(color);
-        for (const loc of hap.context.locations) {
-          const from = loc.start;
-          const to = loc.end;
-          const isVisible = secRanges.some((range) => to >= range.from && from <= range.to);
-          if (isVisible && from >= 0 && to <= docLen && from < to) {
-            marks.push(Decoration.mark({ attributes: { style } }).range(from, to));
-          }
-        }
+    const style = solidPlaybackMark(color);
+    for (const loc of hap.context.locations) {
+      const from = loc.start;
+      const to = loc.end;
+      const isVisible = secRanges.some((range) => to >= range.from && from <= range.to);
+      if (isVisible && from >= 0 && to <= docLen && from < to) {
+        marks.push(Decoration.mark({ attributes: { style } }).range(from, to));
       }
-      try {
-        sec.view.dispatch({ effects: setSecHighlights.of(Decoration.set(marks, true)) });
-      } catch (_) {}
-
     }
   }
+  return marks;
+}
 
-  // Ripples — onset fires immediately, held notes pulse at slow sustain rate
-  const now = performance.now();
+/** Ripples — onset fires immediately, held notes pulse at slow sustain rate */
+function emitHapRipples(haps, now) {
   currentRippleIds.clear();
 
-  for (const hap of visibleHaps) {
+  for (const hap of haps) {
     if (!hap.context?.locations || !hap.whole) continue;
     const noteLoc = findNoteLocation(hap);
     if (!noteLoc) continue;
@@ -1612,6 +1678,55 @@ editor.highlight = function (haps, time) {
   for (const [uid] of liveHaps) {
     if (!currentRippleIds.has(uid)) liveHaps.delete(uid);
   }
+}
+
+editor.highlight = function (haps, time) {
+  const nowMs = performance.now();
+  const graphVisible = graphPlaybackView && !graphPlaybackView.hidden;
+  const editorHighlightDue = nowMs - lastHighlightTime >= HIGHLIGHT_INTERVAL;
+
+  if (graphVisible) {
+    // Skipped frames leave lastGraphCycleTime untouched, so the next
+    // processed frame's onset window still covers the gap.
+    if (nowMs - lastGraphActivityTime < GRAPH_ACTIVITY_INTERVAL) return;
+    lastGraphActivityTime = nowMs;
+    const graphMusicalHaps = musicalHapsFrom(graphHapsForFrame(haps, time));
+    updateOnsets(graphMusicalHaps, nowMs);
+    dispatchGraphActivity(graphMusicalHaps, time, nowMs);
+    return;
+  }
+
+  lastGraphCycleTime = null;
+  if (!editorHighlightDue) return;
+  lastHighlightTime = nowMs;
+  const musicalHaps = musicalHapsFrom(haps);
+  updateOnsets(musicalHaps, nowMs);
+
+  if (nowMs < playbackScrollGuardUntil) return;
+
+  const visibleHaps = hapsInVisibleRanges(musicalHaps, editor.editor.visibleRanges);
+
+  // Every playback mark is a flat solid block with white text. Onsets briefly
+  // use a white background, then the block takes the event colour.
+  const mixedHaps = visibleHaps.map((hap) => {
+    const color = playbackMarkColor(hap, nowMs);
+    return { ...hap, value: { ...hap.value, color, markcss: solidPlaybackMark(color) } };
+  });
+  _origHighlight(mixedHaps, time);
+
+  // Distribute highlights to secondary editors
+  if (currentCols > 1 && secondaryEditors.length > 0) {
+    for (let i = 0; i < secondaryEditors.length; i++) {
+      const sec = secondaryEditors[i];
+      const marks = secondaryHighlightMarks(sec.view, haps, nowMs);
+      try {
+        sec.view.dispatch({ effects: setSecHighlights.of(Decoration.set(marks, true)) });
+      } catch (_) {}
+
+    }
+  }
+
+  emitHapRipples(visibleHaps, performance.now());
 };
 
 function setPerformanceMode(enabled) {
@@ -1622,10 +1737,26 @@ function setPerformanceMode(enabled) {
 }
 
 /* ── Keyboard handler (all shortcuts) ───────────────────── */
+const CTRL_HANDLED_KEYS = ['Enter', 'm', 'w', '1', '2', '3', 'u', '.', 's', 'p', 'o', 'n', 'f'];
+
+const CTRL_SHORTCUTS = new Map([
+  ['Enter', () => { evaluateAll().catch(() => {}); }], // evaluate
+  ['m', (view) => { toggleLineComment(view); }], // mute (toggle line comment)
+  ['w', () => { setWrap(!wrapEnabled); }], // toggle word wrap
+  ['1', () => { setColumnCount(1); }], // column count
+  ['2', () => { setColumnCount(2); }],
+  ['3', () => { setColumnCount(3); }],
+  ['u', () => { evaluateAll(true, { immediate: true }).catch(() => {}); }], // update live
+  ['.', () => { stopPlayback(); }], // stop
+  ['s', () => { saveSong(); }], // save song
+  ['p', () => { openPatchEditor().catch(showDiagnostic); }], // toggle patch editor
+  ['o', () => { showSongBrowser(); }], // open/load song
+  ['n', () => newSong()], // new song
+]);
+
 async function onEditorKeydown(e) {
   const ctrl = e.ctrlKey || e.metaKey;
-  const handledKeys = ['Enter', 'm', 'w', '1', '2', '3', 'u', '.', 's', 'p', 'o', 'n', 'f'];
-  if (ctrl && handledKeys.includes(e.key)) e.stopPropagation();
+  if (ctrl && CTRL_HANDLED_KEYS.includes(e.key)) e.stopPropagation();
 
   const view = e.currentTarget.cmView?.view || editor.editor;
 
@@ -1635,75 +1766,10 @@ async function onEditorKeydown(e) {
     return;
   }
 
-  // Ctrl+Enter — evaluate
-  if (ctrl && e.key === 'Enter') {
-    e.preventDefault();
-    evaluateAll().catch(() => {});
-    return;
-  }
-
-  // Ctrl+M — mute (toggle line comment)
-  if (ctrl && e.key === 'm') {
-    e.preventDefault();
-    toggleLineComment(view);
-    return;
-  }
-
-  // Ctrl+W — toggle word wrap
-  if (ctrl && e.key === 'w') {
-    e.preventDefault();
-    setWrap(!wrapEnabled);
-    return;
-  }
-
-  // Ctrl+1/2/3 — column count
-  if (ctrl && e.key >= '1' && e.key <= '3') {
-    e.preventDefault();
-    setColumnCount(parseInt(e.key));
-    return;
-  }
-
-  // Ctrl+U — update live
-  if (ctrl && e.key === 'u') {
-    e.preventDefault();
-    evaluateAll(true, { immediate: true }).catch(() => {});
-    return;
-  }
-
-  // Ctrl+. — stop
-  if (ctrl && e.key === '.') {
-    e.preventDefault();
-    stopPlayback();
-    return;
-  }
-
-  // Ctrl+S — save song
-  if (ctrl && e.key === 's') {
-    e.preventDefault();
-    saveSong();
-    return;
-  }
-
-  // Ctrl+P — toggle patch editor
-  if (ctrl && e.key === 'p') {
-    e.preventDefault();
-    openPatchEditor().catch(showDiagnostic);
-    return;
-  }
-
-  // Ctrl+O — open/load song
-  if (ctrl && e.key === 'o') {
-    e.preventDefault();
-    showSongBrowser();
-    return;
-  }
-
-  // Ctrl+N — new song
-  if (ctrl && e.key === 'n') {
-    e.preventDefault();
-    await newSong();
-    return;
-  }
+  const shortcut = ctrl ? CTRL_SHORTCUTS.get(e.key) : undefined;
+  if (!shortcut) return;
+  e.preventDefault();
+  await shortcut(view);
 }
 
 /* ── Save / Load songs (file-backed via /api/songs) ──── */
@@ -1782,6 +1848,7 @@ function loadSong(code, name = null, version = null, savedCode = code) {
     lastSavedCode = savedCode;
     localStorage.removeItem('strudel_song_name');
   }
+  initSelectedSection(code);
   pendingExternalUpdate = null;
   clearDiagnostic();
   updateDocumentState();

@@ -22,10 +22,6 @@ const arrangement = [
   { section: 'Final hit', cycles: 1 },
 ]
 
-// Pick this value from its inline menu while playing.
-// Strood queues the jump for the end of the current section, then carries on from there.
-const songPart = 'Opening hook'
-
 // Performance mix
 const master = .25
 const solo = 'all'

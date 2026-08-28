@@ -47,16 +47,6 @@ export function selectedSongSection(code) {
   return section ? { name: section.name, start: section.start } : null;
 }
 
-export function setSelectedSongSection(code, name) {
-  const selected = String(name || '').trim();
-  if (!selected || !SONG_PART.test(code)) return code;
-  SONG_PART.lastIndex = 0;
-  return code.replace(SONG_PART, (match, quote) => match.replace(
-    /(['"])(.*?)\1\s*$/,
-    `${quote}${selected}${quote}`,
-  ));
-}
-
 export function nextCycleTiming(now, cps, leadMs = 80) {
   const targetCycle = Math.floor(now + 0.0001) + 1;
   const milliseconds = Math.max(0, ((targetCycle - now) / cps) * 1000 - leadMs);
