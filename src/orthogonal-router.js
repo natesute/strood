@@ -201,6 +201,55 @@ function introducesObstacleCrossing(before, after, segmentIndex, rectangles) {
   });
 }
 
+function orientationSegments(routes, horizontal) {
+  const movable = [];
+  const assigned = [];
+  for (let routeIndex = 0; routeIndex < routes.length; routeIndex++) {
+    const route = routes[routeIndex];
+    for (let segmentIndex = 1; segmentIndex < route.length; segmentIndex++) {
+      const from = route[segmentIndex - 1];
+      const to = route[segmentIndex];
+      if ((Math.abs(from.y - to.y) < EPSILON) !== horizontal) continue;
+      const segment = { from, to };
+      if (segmentIndex > 1 && segmentIndex < route.length - 1) {
+        movable.push({
+          routeIndex,
+          segmentIndex,
+          length: Math.abs(from.x - to.x) + Math.abs(from.y - to.y),
+        });
+      } else {
+        assigned.push(segment);
+      }
+    }
+  }
+  return { movable, assigned };
+}
+
+function laneShiftedRoute(route, segmentIndex, horizontal, assigned, rectangles, bounds, spacing) {
+  const from = route[segmentIndex - 1];
+  const currentCoordinate = horizontal ? from.y : from.x;
+  const origin = horizontal ? (bounds?.top ?? 0) : (bounds?.left ?? 0);
+  const nearestLane = Math.round((currentCoordinate - origin) / spacing);
+  const candidates = Array.from({ length: 31 }, (_, index) => index - 15)
+    .map((offset) => origin + (nearestLane + offset) * spacing)
+    .sort((left, right) => Math.abs(left - currentCoordinate) - Math.abs(right - currentCoordinate));
+  for (const candidate of candidates) {
+    if (bounds && (horizontal
+      ? candidate < bounds.top - spacing || candidate > bounds.bottom + spacing
+      : candidate < bounds.left - spacing || candidate > bounds.right + spacing)) continue;
+    const shifted = shiftedSegment(route, segmentIndex, candidate, horizontal);
+    if (!parallelLaneIsClear(
+      shifted[segmentIndex - 1],
+      shifted[segmentIndex],
+      assigned,
+      spacing,
+    )) continue;
+    if (introducesObstacleCrossing(route, shifted, segmentIndex, rectangles)) continue;
+    return shifted;
+  }
+  return route;
+}
+
 export function spaceOrthogonalRoutes(routes, rectangles, {
   bounds,
   spacing = 7,
@@ -209,53 +258,19 @@ export function spaceOrthogonalRoutes(routes, rectangles, {
   const orientations = [false, true, false, true];
 
   for (const horizontal of orientations) {
-    const movable = [];
-    const assigned = [];
-    for (let routeIndex = 0; routeIndex < result.length; routeIndex++) {
-      const route = result[routeIndex];
-      for (let segmentIndex = 1; segmentIndex < route.length; segmentIndex++) {
-        const from = route[segmentIndex - 1];
-        const to = route[segmentIndex];
-        if ((Math.abs(from.y - to.y) < EPSILON) !== horizontal) continue;
-        const segment = { from, to };
-        if (segmentIndex > 1 && segmentIndex < route.length - 1) {
-          movable.push({
-            routeIndex,
-            segmentIndex,
-            length: Math.abs(from.x - to.x) + Math.abs(from.y - to.y),
-          });
-        } else {
-          assigned.push(segment);
-        }
-      }
-    }
+    const { movable, assigned } = orientationSegments(result, horizontal);
     movable.sort((left, right) => right.length - left.length);
 
     for (const { routeIndex, segmentIndex } of movable) {
-      const route = result[routeIndex];
-      const from = route[segmentIndex - 1];
-      const currentCoordinate = horizontal ? from.y : from.x;
-      const origin = horizontal ? (bounds?.top ?? 0) : (bounds?.left ?? 0);
-      const nearestLane = Math.round((currentCoordinate - origin) / spacing);
-      const candidates = Array.from({ length: 31 }, (_, index) => index - 15)
-        .map((offset) => origin + (nearestLane + offset) * spacing)
-        .sort((left, right) => Math.abs(left - currentCoordinate) - Math.abs(right - currentCoordinate));
-      let selected = route;
-      for (const candidate of candidates) {
-        if (bounds && (horizontal
-          ? candidate < bounds.top - spacing || candidate > bounds.bottom + spacing
-          : candidate < bounds.left - spacing || candidate > bounds.right + spacing)) continue;
-        const shifted = shiftedSegment(route, segmentIndex, candidate, horizontal);
-        if (!parallelLaneIsClear(
-          shifted[segmentIndex - 1],
-          shifted[segmentIndex],
-          assigned,
-          spacing,
-        )) continue;
-        if (introducesObstacleCrossing(route, shifted, segmentIndex, rectangles)) continue;
-        selected = shifted;
-        break;
-      }
+      const selected = laneShiftedRoute(
+        result[routeIndex],
+        segmentIndex,
+        horizontal,
+        assigned,
+        rectangles,
+        bounds,
+        spacing,
+      );
       result[routeIndex] = selected;
       assigned.push({
         from: selected[segmentIndex - 1],
@@ -389,51 +404,103 @@ function shortestRoute(start, end, points, pointByKey, adjacency, bendPenalty, c
   const endIndex = pointByKey.get(`${end.x}:${end.y}`);
   if (startIndex === undefined || endIndex === undefined) return null;
 
+  // States are index * 3 + direction (0 none, 1 horizontal, 2 vertical) over
+  // typed arrays: the search relaxes the same segments across hundreds of
+  // port combinations, and string-keyed maps dominated its running time.
+  const stateCount = points.length * 3;
+  const distances = new Float64Array(stateCount).fill(Infinity);
+  const previous = new Int32Array(stateCount).fill(-1);
   const heap = new MinHeap();
-  const distances = new Map();
-  const previous = new Map();
-  const startState = `${startIndex}:none`;
-  distances.set(startState, 0);
-  heap.push({ state: startState, index: startIndex, direction: 'none', priority: 0 });
-  let finalState = null;
+  const startState = startIndex * 3;
+  distances[startState] = 0;
+  heap.push({ state: startState, index: startIndex, direction: 0, priority: 0 });
+  let finalState = -1;
 
   while (heap.items.length) {
     const current = heap.pop();
-    const currentDistance = distances.get(current.state);
-    if (currentDistance === undefined) continue;
+    const currentDistance = distances[current.state];
     if (current.index === endIndex) {
       finalState = current.state;
       break;
     }
     for (const edge of adjacency[current.index]) {
-      const turn = current.direction !== 'none' && current.direction !== edge.direction ? bendPenalty : 0;
-      const distance = currentDistance + edge.distance + turn + segmentCongestion(
-        points[current.index],
-        points[edge.index],
-        congestion.reservedSegments,
-        congestion.overlapPenalty,
-        congestion.crossingPenalty,
-        congestion.parallelClearance,
-        congestion.parallelPenalty,
-        congestion.avoidOverlaps,
-        congestion.minimumLaneSeparation,
-      );
-      const state = `${edge.index}:${edge.direction}`;
-      if (distance >= (distances.get(state) ?? Infinity)) continue;
-      distances.set(state, distance);
-      previous.set(state, current.state);
+      const turn = current.direction !== 0 && current.direction !== edge.directionCode ? bendPenalty : 0;
+      const cacheKey = current.index <= edge.index
+        ? current.index * points.length + edge.index
+        : edge.index * points.length + current.index;
+      let segmentCost = congestion.cache?.get(cacheKey);
+      if (segmentCost === undefined) {
+        segmentCost = congestion.indexedCongestion
+          ? congestion.indexedCongestion(points[current.index], points[edge.index])
+          : segmentCongestion(
+            points[current.index],
+            points[edge.index],
+            congestion.reservedSegments,
+            congestion.overlapPenalty,
+            congestion.crossingPenalty,
+            congestion.parallelClearance,
+            congestion.parallelPenalty,
+            congestion.avoidOverlaps,
+            congestion.minimumLaneSeparation,
+          );
+        congestion.cache?.set(cacheKey, segmentCost);
+      }
+      const distance = currentDistance + edge.distance + turn + segmentCost;
+      const state = edge.index * 3 + edge.directionCode;
+      if (distance >= distances[state]) continue;
+      distances[state] = distance;
+      previous[state] = current.state;
       const point = points[edge.index];
       const heuristic = Math.abs(point.x - end.x) + Math.abs(point.y - end.y);
-      heap.push({ state, index: edge.index, direction: edge.direction, priority: distance + heuristic });
+      heap.push({ state, index: edge.index, direction: edge.directionCode, priority: distance + heuristic });
     }
   }
 
-  if (!finalState) return null;
+  if (finalState === -1) return null;
   const route = [];
-  for (let state = finalState; state; state = previous.get(state)) {
-    route.push(points[Number(state.split(':')[0])]);
+  for (let state = finalState; state !== -1; state = previous[state]) {
+    route.push(points[(state / 3) | 0]);
   }
   return simplify(route.reverse());
+}
+
+function buildVisibilityGrid(blockers, xs, ys) {
+  const points = [];
+  const pointByKey = new Map();
+  const rows = new Map();
+  const columns = new Map();
+  for (const y of ys) {
+    for (const x of xs) {
+      const point = { x, y };
+      if (blockers.some((rect) => inside(rect, point))) continue;
+      const index = points.length;
+      points.push(point);
+      pointByKey.set(`${x}:${y}`, index);
+      const row = rows.get(y) || [];
+      row.push(index);
+      rows.set(y, row);
+      const column = columns.get(x) || [];
+      column.push(index);
+      columns.set(x, column);
+    }
+  }
+  const adjacency = Array.from({ length: points.length }, () => []);
+  const connect = (indices, direction) => {
+    for (let index = 1; index < indices.length; index++) {
+      const fromIndex = indices[index - 1];
+      const toIndex = indices[index];
+      const from = points[fromIndex];
+      const to = points[toIndex];
+      if (blockers.some((rect) => segmentCrosses(rect, from, to))) continue;
+      const distance = Math.abs(from.x - to.x) + Math.abs(from.y - to.y);
+      const directionCode = direction === 'horizontal' ? 1 : 2;
+      adjacency[fromIndex].push({ index: toIndex, direction, directionCode, distance });
+      adjacency[toIndex].push({ index: fromIndex, direction, directionCode, distance });
+    }
+  };
+  for (const indices of rows.values()) connect(indices, 'horizontal');
+  for (const indices of columns.values()) connect(indices, 'vertical');
+  return { points, pointByKey, adjacency };
 }
 
 function fallbackVisibilityRoute(
@@ -474,40 +541,7 @@ function fallbackVisibilityRoute(
     ...(bounds ? [bounds.top, bounds.bottom] : []),
     ...blockers.flatMap((rect) => [rect.top, rect.bottom]),
   ]);
-  const points = [];
-  const pointByKey = new Map();
-  const rows = new Map();
-  const columns = new Map();
-  for (const y of ys) {
-    for (const x of xs) {
-      const point = { x, y };
-      if (blockers.some((rect) => inside(rect, point))) continue;
-      const index = points.length;
-      points.push(point);
-      pointByKey.set(`${x}:${y}`, index);
-      const row = rows.get(y) || [];
-      row.push(index);
-      rows.set(y, row);
-      const column = columns.get(x) || [];
-      column.push(index);
-      columns.set(x, column);
-    }
-  }
-  const adjacency = Array.from({ length: points.length }, () => []);
-  const connect = (indices, direction) => {
-    for (let index = 1; index < indices.length; index += 1) {
-      const fromIndex = indices[index - 1];
-      const toIndex = indices[index];
-      const from = points[fromIndex];
-      const to = points[toIndex];
-      if (blockers.some((rect) => segmentCrosses(rect, from, to))) continue;
-      const distance = Math.abs(from.x - to.x) + Math.abs(from.y - to.y);
-      adjacency[fromIndex].push({ index: toIndex, direction, distance });
-      adjacency[toIndex].push({ index: fromIndex, direction, distance });
-    }
-  };
-  for (const indices of rows.values()) connect(indices, 'horizontal');
-  for (const indices of columns.values()) connect(indices, 'vertical');
+  const { points, pointByKey, adjacency } = buildVisibilityGrid(blockers, xs, ys);
   return shortestRoute(start, end, points, pointByKey, adjacency, bendPenalty, congestion);
 }
 
@@ -586,45 +620,55 @@ export function createOrthogonalRouter(rectangles, {
   }
   const xs = uniqueSorted(xValues);
   const ys = uniqueSorted(yValues);
-  const points = [];
-  const pointByKey = new Map();
-  const rows = new Map();
-  const columns = new Map();
-
-  for (const y of ys) {
-    for (const x of xs) {
-      const point = { x, y };
-      if (obstacles.some((rect) => inside(rect, point))) continue;
-      const index = points.length;
-      points.push(point);
-      pointByKey.set(`${x}:${y}`, index);
-      const row = rows.get(y) || [];
-      row.push(index);
-      rows.set(y, row);
-      const column = columns.get(x) || [];
-      column.push(index);
-      columns.set(x, column);
-    }
-  }
-
-  const adjacency = Array.from({ length: points.length }, () => []);
-  const connect = (indices, direction) => {
-    for (let index = 1; index < indices.length; index++) {
-      const fromIndex = indices[index - 1];
-      const toIndex = indices[index];
-      const from = points[fromIndex];
-      const to = points[toIndex];
-      if (obstacles.some((rect) => segmentCrosses(rect, from, to))) continue;
-      const distance = Math.abs(from.x - to.x) + Math.abs(from.y - to.y);
-      adjacency[fromIndex].push({ index: toIndex, direction, distance });
-      adjacency[toIndex].push({ index: fromIndex, direction, distance });
-    }
-  };
-  for (const indices of rows.values()) connect(indices, 'horizontal');
-  for (const indices of columns.values()) connect(indices, 'vertical');
+  const { points, pointByKey, adjacency } = buildVisibilityGrid(obstacles, xs, ys);
 
   const portUsage = new Map();
   const reservedSegments = [];
+  // Reserved segments indexed by orientation and sorted by lane coordinate,
+  // so congestion queries touch only the segments near a candidate's lane
+  // instead of scanning every reserved segment per search step.
+  const reservedIndex = { horizontal: [], vertical: [] };
+  const laneLowerBound = (list, lane) => {
+    let low = 0;
+    let high = list.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (list[middle].lane < lane) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+  const indexedCongestion = (from, to) => {
+    const horizontal = Math.abs(from.y - to.y) < EPSILON;
+    const lane = horizontal ? from.y : from.x;
+    const spanLow = horizontal ? Math.min(from.x, to.x) : Math.min(from.y, to.y);
+    const spanHigh = horizontal ? Math.max(from.x, to.x) : Math.max(from.y, to.y);
+    let cost = 0;
+    const same = horizontal ? reservedIndex.horizontal : reservedIndex.vertical;
+    const window = Math.max(parallelClearance, minimumLaneSeparation, EPSILON);
+    for (let index = laneLowerBound(same, lane - window); index < same.length; index++) {
+      const entry = same[index];
+      if (entry.lane > lane + window) break;
+      const overlap = rangeOverlap(spanLow, spanHigh, entry.lo, entry.hi);
+      if (overlap <= 0) continue;
+      const laneDistance = Math.abs(entry.lane - lane);
+      if (avoidOverlaps && overlap > EPSILON
+        && laneDistance < Math.max(EPSILON, minimumLaneSeparation)) return Infinity;
+      if (laneDistance < EPSILON) {
+        cost += overlap * overlapPenalty;
+      } else if (laneDistance < parallelClearance) {
+        const proximity = (parallelClearance - laneDistance) / parallelClearance;
+        cost += overlap * parallelPenalty * proximity;
+      }
+    }
+    const crossing = horizontal ? reservedIndex.vertical : reservedIndex.horizontal;
+    for (let index = laneLowerBound(crossing, spanLow + EPSILON); index < crossing.length; index++) {
+      const entry = crossing[index];
+      if (entry.lane >= spanHigh - EPSILON) break;
+      if (lane > entry.lo + EPSILON && lane < entry.hi - EPSILON) cost += crossingPenalty;
+    }
+    return cost;
+  };
   const congestion = {
     reservedSegments,
     overlapPenalty,
@@ -633,11 +677,25 @@ export function createOrthogonalRouter(rectangles, {
     parallelPenalty,
     avoidOverlaps,
     minimumLaneSeparation,
+    indexedCongestion,
+    // Congestion for a grid segment only changes when a route is reserved,
+    // but the search re-evaluates the same segments across direction states
+    // and port combinations; the cache turns those repeats into lookups.
+    cache: new Map(),
   };
   const reserve = (route) => {
     for (let index = 1; index < route.length; index++) {
-      reservedSegments.push({ from: route[index - 1], to: route[index] });
+      const from = route[index - 1];
+      const to = route[index];
+      reservedSegments.push({ from, to });
+      const horizontal = Math.abs(from.y - to.y) < EPSILON;
+      const list = horizontal ? reservedIndex.horizontal : reservedIndex.vertical;
+      const entry = horizontal
+        ? { lane: from.y, lo: Math.min(from.x, to.x), hi: Math.max(from.x, to.x) }
+        : { lane: from.x, lo: Math.min(from.y, to.y), hi: Math.max(from.y, to.y) };
+      list.splice(laneLowerBound(list, entry.lane), 0, entry);
     }
+    congestion.cache.clear();
   };
 
   return {
@@ -735,6 +793,23 @@ export function routeOrthogonal(start, end, rectangles, options = {}) {
   return router.route(start, end, options.sourceId, options.targetId);
 }
 
+function narrowSelfLoopGaps(candidates, rect, other) {
+  const overlapsVertically = other.top < rect.bottom && other.bottom > rect.top;
+  const overlapsHorizontally = other.left < rect.right && other.right > rect.left;
+  if (overlapsVertically && other.left >= rect.right) {
+    candidates[0].gap = Math.min(candidates[0].gap, other.left - rect.right);
+  }
+  if (overlapsHorizontally && other.top >= rect.bottom) {
+    candidates[1].gap = Math.min(candidates[1].gap, other.top - rect.bottom);
+  }
+  if (overlapsVertically && other.right <= rect.left) {
+    candidates[2].gap = Math.min(candidates[2].gap, rect.left - other.right);
+  }
+  if (overlapsHorizontally && other.bottom <= rect.top) {
+    candidates[3].gap = Math.min(candidates[3].gap, rect.top - other.bottom);
+  }
+}
+
 function selfLoopSide(rect, rectangles, bounds) {
   const candidates = [
     { side: 'right', gap: (bounds?.right ?? Infinity) - rect.right },
@@ -744,20 +819,7 @@ function selfLoopSide(rect, rectangles, bounds) {
   ];
   for (const other of rectangles) {
     if (other.id === rect.id) continue;
-    const overlapsVertically = other.top < rect.bottom && other.bottom > rect.top;
-    const overlapsHorizontally = other.left < rect.right && other.right > rect.left;
-    if (overlapsVertically && other.left >= rect.right) {
-      candidates[0].gap = Math.min(candidates[0].gap, other.left - rect.right);
-    }
-    if (overlapsHorizontally && other.top >= rect.bottom) {
-      candidates[1].gap = Math.min(candidates[1].gap, other.top - rect.bottom);
-    }
-    if (overlapsVertically && other.right <= rect.left) {
-      candidates[2].gap = Math.min(candidates[2].gap, rect.left - other.right);
-    }
-    if (overlapsHorizontally && other.bottom <= rect.top) {
-      candidates[3].gap = Math.min(candidates[3].gap, rect.top - other.bottom);
-    }
+    narrowSelfLoopGaps(candidates, rect, other);
   }
   return candidates.sort((left, right) => right.gap - left.gap)[0].side;
 }
@@ -815,27 +877,8 @@ function routingLaneBank(min, max, requestedCount, spacing) {
     min + ((index + 1) * (max - min)) / (count + 1));
 }
 
-export function routeOrthogonalEdges(rectangles, edges, options = {}) {
-  const byId = new Map(rectangles.map((rectangle) => [rectangle.id, rectangle]));
-  const assignments = edges.map((edge, edgeIndex) => {
-    const source = byId.get(edge.from);
-    const target = byId.get(edge.to);
-    if (!source || !target) return { edge, edgeIndex, source, target };
-    return {
-      edge,
-      edgeIndex,
-      source,
-      target,
-      ...facingSides(
-        source,
-        target,
-        edge.from === edge.to ? selfLoopSide(source, rectangles, options.bounds) : null,
-      ),
-    };
-  });
+function collectPortIncidences(assignments) {
   const incidences = new Map();
-  const usedHorizontalPortLanes = new Set();
-  const usedVerticalPortLanes = new Set();
   const addIncidence = (assignment, endpoint, rect, side, other) => {
     const key = `${rect.id}:${side}`;
     const entries = incidences.get(key) || [];
@@ -859,7 +902,12 @@ export function routeOrthogonalEdges(rectangles, edges, options = {}) {
       assignment.source,
     );
   }
+  return incidences;
+}
 
+function assignPortCoordinates(incidences) {
+  const usedHorizontalPortLanes = new Set();
+  const usedVerticalPortLanes = new Set();
   for (const entries of incidences.values()) {
     const verticalSide = entries[0].side === 'left' || entries[0].side === 'right';
     entries.sort((left, right) => {
@@ -889,7 +937,9 @@ export function routeOrthogonalEdges(rectangles, edges, options = {}) {
       );
     });
   }
+}
 
+function portLaneValues(assignments, options) {
   const extraXValues = [...(options.extraXValues || [])];
   const extraYValues = [...(options.extraYValues || [])];
   for (const assignment of assignments) {
@@ -902,30 +952,19 @@ export function routeOrthogonalEdges(rectangles, edges, options = {}) {
       else extraXValues.push(port.x);
     }
   }
-  const routingBounds = options.bounds || (rectangles.length ? {
+  return { extraXValues, extraYValues };
+}
+
+function routingBoundsFor(rectangles, options) {
+  return options.bounds || (rectangles.length ? {
     left: Math.min(...rectangles.map((rectangle) => rectangle.left)) - 24,
     right: Math.max(...rectangles.map((rectangle) => rectangle.right)) + 24,
     top: Math.min(...rectangles.map((rectangle) => rectangle.top)) - 24,
     bottom: Math.max(...rectangles.map((rectangle) => rectangle.bottom)) + 24,
   } : { left: 0, right: 100, top: 0, bottom: 100 });
-  const laneSpacing = options.laneSpacing ?? 7;
-  const laneBankX = routingLaneBank(
-    routingBounds.left,
-    routingBounds.right,
-    edges.length,
-    laneSpacing,
-  );
-  const laneBankY = routingLaneBank(
-    routingBounds.top,
-    routingBounds.bottom,
-    edges.length,
-    laneSpacing,
-  );
-  const minimumLaneSeparation = options.minimumLaneSeparation ?? 2;
-  const flexiblePorts = rectangles.length < (options.flexiblePortNodeLimit ?? 30);
-  const fallbackClearance = flexiblePorts
-    ? Math.max(0, (options.clearance ?? 12) - 2)
-    : 0;
+}
+
+function routingAttempts(assignments, edges) {
   const degree = new Map();
   for (const edge of edges) {
     degree.set(edge.from, (degree.get(edge.from) || 0) + 1);
@@ -947,13 +986,81 @@ export function routeOrthogonalEdges(rectangles, edges, options = {}) {
       || String(left.edge.id).localeCompare(String(right.edge.id))
       || left.edgeIndex - right.edgeIndex;
   });
-  const attempts = [
+  return [
     { order: assignments, extraLanes: false },
     { order: assignments, extraLanes: true },
     { order: difficultFirst, extraLanes: true },
     { order: [...assignments].reverse(), extraLanes: true },
   ];
-  let failedEdgeId = null;
+}
+
+function routeAttemptEdges(router, order, edgeCount, flexiblePorts) {
+  const routes = Array.from({ length: edgeCount }, () => []);
+  for (const assignment of order) {
+    if (!assignment.sourcePort || !assignment.targetPort) {
+      return { routes, complete: false, failedEdgeId: assignment.edge.id };
+    }
+    const useFlexiblePorts = flexiblePorts && assignment.edge.from !== assignment.edge.to;
+    let route = useFlexiblePorts
+      ? router.routeBetween(assignment.edge.from, assignment.edge.to)
+      : router.route(
+        assignment.sourcePort,
+        assignment.targetPort,
+        assignment.edge.from,
+        assignment.edge.to,
+      );
+    if (!route.length && !useFlexiblePorts) {
+      route = router.routeBetween(assignment.edge.from, assignment.edge.to);
+    }
+    if (!route.length) {
+      return { routes, complete: false, failedEdgeId: assignment.edge.id };
+    }
+    routes[assignment.edgeIndex] = route;
+  }
+  return { routes, complete: true, failedEdgeId: null };
+}
+
+export function routeOrthogonalEdges(rectangles, edges, options = {}) {
+  const byId = new Map(rectangles.map((rectangle) => [rectangle.id, rectangle]));
+  const assignments = edges.map((edge, edgeIndex) => {
+    const source = byId.get(edge.from);
+    const target = byId.get(edge.to);
+    if (!source || !target) return { edge, edgeIndex, source, target };
+    return {
+      edge,
+      edgeIndex,
+      source,
+      target,
+      ...facingSides(
+        source,
+        target,
+        edge.from === edge.to ? selfLoopSide(source, rectangles, options.bounds) : null,
+      ),
+    };
+  });
+  assignPortCoordinates(collectPortIncidences(assignments));
+
+  const { extraXValues, extraYValues } = portLaneValues(assignments, options);
+  const routingBounds = routingBoundsFor(rectangles, options);
+  const laneSpacing = options.laneSpacing ?? 7;
+  const laneBankX = routingLaneBank(
+    routingBounds.left,
+    routingBounds.right,
+    edges.length,
+    laneSpacing,
+  );
+  const laneBankY = routingLaneBank(
+    routingBounds.top,
+    routingBounds.bottom,
+    edges.length,
+    laneSpacing,
+  );
+  const minimumLaneSeparation = options.minimumLaneSeparation ?? 2;
+  const flexiblePorts = rectangles.length < (options.flexiblePortNodeLimit ?? 30);
+  const fallbackClearance = flexiblePorts
+    ? Math.max(0, (options.clearance ?? 12) - 2)
+    : 0;
+  const attempts = routingAttempts(assignments, edges);
   const failedAttempts = [];
   for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
     const attempt = attempts[attemptIndex];
@@ -965,33 +1072,12 @@ export function routeOrthogonalEdges(rectangles, edges, options = {}) {
       extraXValues: attempt.extraLanes ? [...extraXValues, ...laneBankX] : extraXValues,
       extraYValues: attempt.extraLanes ? [...extraYValues, ...laneBankY] : extraYValues,
     });
-    const routes = Array.from({ length: edges.length }, () => []);
-    let complete = true;
-    for (const assignment of attempt.order) {
-      if (!assignment.sourcePort || !assignment.targetPort) {
-        failedEdgeId = assignment.edge.id;
-        complete = false;
-        break;
-      }
-      const useFlexiblePorts = flexiblePorts && assignment.edge.from !== assignment.edge.to;
-      let route = useFlexiblePorts
-        ? router.routeBetween(assignment.edge.from, assignment.edge.to)
-        : router.route(
-          assignment.sourcePort,
-          assignment.targetPort,
-          assignment.edge.from,
-          assignment.edge.to,
-        );
-      if (!route.length && !useFlexiblePorts) {
-        route = router.routeBetween(assignment.edge.from, assignment.edge.to);
-      }
-      if (!route.length) {
-        failedEdgeId = assignment.edge.id;
-        complete = false;
-        break;
-      }
-      routes[assignment.edgeIndex] = route;
-    }
+    const { routes, complete, failedEdgeId } = routeAttemptEdges(
+      router,
+      attempt.order,
+      edges.length,
+      flexiblePorts,
+    );
     if (!complete) {
       failedAttempts.push(`${attemptIndex + 1}:${failedEdgeId}`);
       continue;
@@ -1066,10 +1152,12 @@ function groupedSegmentBridges(
   return bridgeGroups.map((bridge) => {
     const before = bridge.firstAxis - direction * bridgeRadius;
     const after = bridge.lastAxis + direction * bridgeRadius;
+    // Bridges arch at half the clamped depth: tall hoops read as knots at
+    // graph zoom, a low arch still separates the crossing cleanly.
     const bridgeDepth = Math.min(
       maxBridgeDepth,
       Math.max(bridgeRadius, Math.abs(after - before) / 2),
-    );
+    ) / 2;
     return { horizontal, before, after, bridgeDepth };
   });
 }

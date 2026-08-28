@@ -316,7 +316,8 @@ summary:focus-visible,
   background: #070a0f;
 }
 .graph-visualizers-toggle,
-.graph-background-toggle {
+.graph-background-toggle,
+.graph-relayout {
   height: 30px;
   flex: 0 0 auto;
   align-self: center;
@@ -336,13 +337,16 @@ summary:focus-visible,
 .graph-visualizers-toggle:hover,
 .graph-visualizers-toggle:focus-visible,
 .graph-background-toggle:hover,
-.graph-background-toggle:focus-visible {
+.graph-background-toggle:focus-visible,
+.graph-relayout:hover,
+.graph-relayout:focus-visible {
   border-color: #526174;
   color: #dce4eb;
   outline: none;
 }
 .graph-visualizers-toggle svg,
-.graph-background-toggle svg {
+.graph-background-toggle svg,
+.graph-relayout svg {
   width: 13px;
   height: 13px;
   fill: none;
@@ -551,7 +555,7 @@ summary:focus-visible,
   --graph-edge-stroke-width: 1.4;
   --graph-active-edge-stroke-width: 2.2;
   --graph-edge-lane-separation: 2.8;
-  --graph-bridge-cutout-width: 5.4;
+  --graph-bridge-cutout-width: 3.4;
   --graph-edge-render-stroke-width: var(--graph-edge-stroke-width);
   --graph-active-edge-render-stroke-width: var(--graph-active-edge-stroke-width);
   --graph-edge-render-lane-separation: var(--graph-edge-lane-separation);

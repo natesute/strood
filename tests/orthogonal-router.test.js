@@ -250,20 +250,20 @@ describe('orthogonal graph routing', () => {
     expect(path).toMatch(/^M 0 30 L 45\.5 30 C /);
     expect(path.endsWith(' L 100 30')).toBe(true);
     expect(orthogonalBridgePath(later, crossings))
-      .toBe('M 45.5 30 C 45.5 25.5 54.5 25.5 54.5 30');
+      .toBe('M 45.5 30 C 45.5 27.75 54.5 27.75 54.5 30');
   });
 
   it('masks every other edge reached by the rendered bridge curve', () => {
     const routes = [
-      [{ x: 0, y: 26.625 }, { x: 100, y: 26.625 }],
+      [{ x: 0, y: 28.3125 }, { x: 100, y: 28.3125 }],
       [{ x: 50, y: 0 }, { x: 50, y: 60 }],
       [{ x: 0, y: 30 }, { x: 100, y: 30 }],
     ];
-    const bridgePath = 'M 45.5 30 C 45.5 25.5 54.5 25.5 54.5 30';
+    const bridgePath = 'M 45.5 30 C 45.5 27.75 54.5 27.75 54.5 30';
     const { crossingsByEdge, underpassCutouts } = planOrthogonalBridges(routes);
-    const renderedBridgeMidpointY = (30 + 3 * 25.5 + 3 * 25.5 + 30) / 8;
+    const renderedBridgeMidpointY = (30 + 3 * 27.75 + 3 * 27.75 + 30) / 8;
 
-    expect(findParallelSegmentConflicts([routes[0], routes[2]], 2)).toEqual([]);
+    expect(findParallelSegmentConflicts([routes[0], routes[2]], 1.5)).toEqual([]);
     expect(routes[0][0].y).toBe(renderedBridgeMidpointY);
     expect(crossingsByEdge[2]).toContainEqual({ segmentIndex: 1, x: 50, y: 30 });
     expect(underpassCutouts[0]).toContain(bridgePath);
@@ -282,17 +282,17 @@ describe('orthogonal graph routing', () => {
     ];
 
     expect(planOrthogonalBridges(horizontal, { cutoutOffset: 2 }).underpassCutouts[0])
-      .toContain('M 45.5 32 C 45.5 27.5 54.5 27.5 54.5 32');
+      .toContain('M 45.5 32 C 45.5 29.75 54.5 29.75 54.5 32');
     expect(planOrthogonalBridges(vertical, { cutoutOffset: 2 }).underpassCutouts[0])
-      .toContain('M 48 25.5 C 52.5 25.5 52.5 34.5 48 34.5');
+      .toContain('M 48 25.5 C 50.25 25.5 50.25 34.5 48 34.5');
   });
 
   it('uses bridge overlays for priority without exposing later straight segments', () => {
     const vertical = [{ x: 50, y: 0 }, { x: 50, y: 60 }];
     const earlierBridge = [{ x: 0, y: 30 }, { x: 100, y: 30 }];
-    const laterBridge = [{ x: 0, y: 26.625 }, { x: 100, y: 26.625 }];
-    const earlierBridgePath = 'M 45.5 30 C 45.5 25.5 54.5 25.5 54.5 30';
-    const laterBridgePath = 'M 45.5 26.625 C 45.5 22.125 54.5 22.125 54.5 26.625';
+    const laterBridge = [{ x: 0, y: 28.3125 }, { x: 100, y: 28.3125 }];
+    const earlierBridgePath = 'M 45.5 30 C 45.5 27.75 54.5 27.75 54.5 30';
+    const laterBridgePath = 'M 45.5 28.3125 C 45.5 26.0625 54.5 26.0625 54.5 28.3125';
     const bridgePlan = planOrthogonalBridges([vertical, earlierBridge, laterBridge]);
 
     expect(bridgePlan.underpassCutouts[1]).toContain(laterBridgePath);
@@ -300,7 +300,7 @@ describe('orthogonal graph routing', () => {
     expect(bridgePlan.bridgeOverlayCutouts[1]).toContain(laterBridgePath);
     expect(bridgePlan.bridgeOverlayCutouts[2]).not.toContain(earlierBridgePath);
 
-    const laterStraight = [{ x: 44, y: 26.625 }, { x: 49, y: 26.625 }];
+    const laterStraight = [{ x: 44, y: 28.3125 }, { x: 49, y: 28.3125 }];
     const straightPlan = planOrthogonalBridges([vertical, earlierBridge, laterStraight]);
     expect(straightPlan.crossingsByEdge[2]).toEqual([]);
     expect(straightPlan.underpassCutouts[2]).toContain(earlierBridgePath);
@@ -311,8 +311,8 @@ describe('orthogonal graph routing', () => {
       [{ x: 0, y: 30 }, { x: 100, y: 30 }],
       [{ x: 0, y: 26.625 }, { x: 79, y: 26.625 }],
     ]);
-    const farEarlierBridge = 'M 75.5 30 C 75.5 25.5 84.5 25.5 84.5 30';
-    const mixedLaterBridge = 'M 15.5 26.625 C 15.5 22.125 24.5 22.125 24.5 26.625';
+    const farEarlierBridge = 'M 75.5 30 C 75.5 27.75 84.5 27.75 84.5 30';
+    const mixedLaterBridge = 'M 15.5 26.625 C 15.5 24.375 24.5 24.375 24.5 26.625';
     expect(mixedPlan.bridgePathsByEdge[3]).toEqual([mixedLaterBridge]);
     expect(mixedPlan.underpassCutouts[3]).toContain(farEarlierBridge);
     expect(mixedPlan.bridgeOverlayCutouts[2]).toContain(mixedLaterBridge);
@@ -324,7 +324,7 @@ describe('orthogonal graph routing', () => {
       [{ x: 0, y: 30 }, { x: 100, y: 30 }],
       [{ x: 44, y: 21 }, { x: 49, y: 21 }],
     ];
-    const bridgePath = 'M 45.5 30 C 45.5 25.5 54.5 25.5 54.5 30';
+    const bridgePath = 'M 45.5 30 C 45.5 27.75 54.5 27.75 54.5 30';
 
     expect(planOrthogonalBridges(routes, { interactionPadding: 4 })
       .underpassCutouts[2]).not.toContain(bridgePath);
@@ -369,7 +369,7 @@ describe('orthogonal graph routing', () => {
 
     expect(crossings).toHaveLength(3);
     expect(path.match(/ C /g)).toHaveLength(1);
-    expect(path).toBe('M 50 0 L 50 25.5 C 59 25.5 59 48.5 50 48.5 L 50 80');
+    expect(path).toBe('M 50 0 L 50 25.5 C 54.5 25.5 54.5 48.5 50 48.5 L 50 80');
   });
 
   it('keeps a bundled bridge inside the router clearance', () => {
@@ -383,6 +383,6 @@ describe('orthogonal graph routing', () => {
 
     expect(crossings).toHaveLength(5);
     expect(path.match(/ C /g)).toHaveLength(1);
-    expect(path).toContain('C 59 25.5 59 62.5 50 62.5');
+    expect(path).toContain('C 54.5 25.5 54.5 62.5 50 62.5');
   });
 });
