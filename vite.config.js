@@ -124,6 +124,100 @@ function liveSyncPlugin() {
   };
 }
 
+async function listSongs(res) {
+  const files = (await fs.promises.readdir(SONGS_DIR))
+    .filter((file) => file.endsWith('.strudel') && isSafeName(file.replace(/\.strudel$/, '')));
+  const songs = await Promise.all(files.map(async (file) => {
+    const stat = await fs.promises.stat(path.join(SONGS_DIR, file));
+    return { name: file.replace(/\.strudel$/, ''), mtime: stat.mtimeMs, size: stat.size };
+  }));
+  songs.sort((a, b) => b.mtime - a.mtime);
+  return sendJson(res, 200, songs);
+}
+
+async function readHistoryEntry(res, name, id) {
+  if (!isSafeName(name) || !/^[A-Za-z0-9-]+$/.test(id || '')) return sendJson(res, 400, { code: 'invalid_name', message: 'Invalid song or history name' });
+  const filePath = path.join(historyFolder(name), `${id}.strudel`);
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { code: 'not_found', message: 'Recovery version not found' });
+  return sendText(res, 200, await fs.promises.readFile(filePath, 'utf8'));
+}
+
+async function listHistory(res, name) {
+  if (!isSafeName(name)) return sendJson(res, 400, { code: 'invalid_name', message: 'Invalid song name' });
+  const folder = historyFolder(name);
+  if (!fs.existsSync(folder)) return sendJson(res, 200, []);
+  const files = (await fs.promises.readdir(folder)).filter((file) => file.endsWith('.strudel')).sort().reverse();
+  return sendJson(res, 200, files.map((file) => {
+    const id = file.replace(/\.strudel$/, '');
+    return { id, createdAt: Number(id.split('-')[0]) };
+  }));
+}
+
+async function renameSong(res, { from, to, fromPath, toPath }) {
+  if (!fs.existsSync(fromPath)) return sendJson(res, 404, { code: 'not_found', message: 'Song not found' });
+  if (fs.existsSync(toPath)) return sendJson(res, 409, { code: 'already_exists', message: 'A song with that name already exists' });
+  await fs.promises.rename(fromPath, toPath);
+  const fromHistory = historyFolder(from);
+  const toHistory = historyFolder(to);
+  if (fs.existsSync(fromHistory)) {
+    if (!fs.existsSync(toHistory)) {
+      await fs.promises.rename(fromHistory, toHistory);
+    } else {
+      // A stale folder from an earlier life of the target name:
+      // merge our snapshots into it so no history is orphaned.
+      const snapshots = await fs.promises.readdir(fromHistory);
+      await Promise.all(snapshots.map((file) => fs.promises.rename(path.join(fromHistory, file), path.join(toHistory, file))));
+      await fs.promises.rm(fromHistory, { recursive: true, force: true });
+    }
+  }
+  return sendJson(res, 200, { name: to });
+}
+
+async function readSong(res, filePath) {
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { code: 'not_found', message: 'Song not found' });
+  const content = await fs.promises.readFile(filePath, 'utf8');
+  return sendText(res, 200, content, { ETag: versionOf(content), 'Cache-Control': 'no-store' });
+}
+
+async function writeSong(req, res, name, filePath, content) {
+  const existing = fs.existsSync(filePath) ? await fs.promises.readFile(filePath, 'utf8') : null;
+  const currentVersion = existing == null ? null : versionOf(existing);
+  const expectedVersion = req.headers['if-match'];
+  if (expectedVersion && expectedVersion !== currentVersion) {
+    return sendJson(res, 409, {
+      code: 'version_conflict',
+      message: 'This song changed on disk after you opened it',
+      currentVersion,
+    });
+  }
+  if (existing != null && existing !== content) await snapshotSong(name, existing);
+  await atomicWrite(filePath, content);
+  const version = versionOf(content);
+  return sendJson(res, 200, { ok: true, version }, { ETag: version });
+}
+
+async function trashSong(res, name, filePath) {
+  if (!fs.existsSync(filePath)) return sendJson(res, 404, { code: 'not_found', message: 'Song not found' });
+  await fs.promises.mkdir(TRASH_DIR, { recursive: true });
+  await fs.promises.rename(filePath, path.join(TRASH_DIR, `${name}-${Date.now()}.strudel`));
+  // Retire the history folder alongside the song so a future song
+  // with the same name doesn't adopt this one's snapshots.
+  const historyPath = historyFolder(name);
+  if (fs.existsSync(historyPath)) {
+    await fs.promises.rename(historyPath, path.join(TRASH_DIR, `history-${path.basename(historyPath)}-${Date.now()}`));
+  }
+  return sendJson(res, 200, { ok: true, recoverable: true });
+}
+
+function sendApiError(server, res, error) {
+  const status = error.statusCode || 500;
+  if (status >= 500) server.config.logger.error(error.stack || error.message);
+  return sendJson(res, status, {
+    code: error.code || 'server_error',
+    message: error.message || 'Server error',
+  });
+}
+
 function songsApi() {
   return {
     name: 'songs-api',
@@ -136,37 +230,17 @@ function songsApi() {
           await fs.promises.mkdir(SONGS_DIR, { recursive: true });
 
           if (req.method === 'GET' && url.pathname === '/api/songs') {
-            const files = (await fs.promises.readdir(SONGS_DIR))
-              .filter((file) => file.endsWith('.strudel') && isSafeName(file.replace(/\.strudel$/, '')));
-            const songs = await Promise.all(files.map(async (file) => {
-              const stat = await fs.promises.stat(path.join(SONGS_DIR, file));
-              return { name: file.replace(/\.strudel$/, ''), mtime: stat.mtimeMs, size: stat.size };
-            }));
-            songs.sort((a, b) => b.mtime - a.mtime);
-            return sendJson(res, 200, songs);
+            return await listSongs(res);
           }
 
           const historyRead = url.pathname.match(/^\/api\/songs\/([^/]+)\/history\/([^/]+)$/);
           if (req.method === 'GET' && historyRead) {
-            const name = decodeSegment(historyRead[1]);
-            const id = decodeSegment(historyRead[2]);
-            if (!isSafeName(name) || !/^[A-Za-z0-9-]+$/.test(id || '')) return sendJson(res, 400, { code: 'invalid_name', message: 'Invalid song or history name' });
-            const filePath = path.join(historyFolder(name), `${id}.strudel`);
-            if (!fs.existsSync(filePath)) return sendJson(res, 404, { code: 'not_found', message: 'Recovery version not found' });
-            return sendText(res, 200, await fs.promises.readFile(filePath, 'utf8'));
+            return await readHistoryEntry(res, decodeSegment(historyRead[1]), decodeSegment(historyRead[2]));
           }
 
           const historyList = url.pathname.match(/^\/api\/songs\/([^/]+)\/history$/);
           if (req.method === 'GET' && historyList) {
-            const name = decodeSegment(historyList[1]);
-            if (!isSafeName(name)) return sendJson(res, 400, { code: 'invalid_name', message: 'Invalid song name' });
-            const folder = historyFolder(name);
-            if (!fs.existsSync(folder)) return sendJson(res, 200, []);
-            const files = (await fs.promises.readdir(folder)).filter((file) => file.endsWith('.strudel')).sort().reverse();
-            return sendJson(res, 200, files.map((file) => {
-              const id = file.replace(/\.strudel$/, '');
-              return { id, createdAt: Number(id.split('-')[0]) };
-            }));
+            return await listHistory(res, decodeSegment(historyList[1]));
           }
 
           const renameMatch = url.pathname.match(/^\/api\/songs\/([^/]+)\/rename$/);
@@ -179,25 +253,7 @@ function songsApi() {
             if (!fromPath || !toPath) return sendJson(res, 400, { code: 'invalid_name', message: 'Use letters, numbers, spaces, hyphens or underscores' });
             const [first, second] = [...new Set([from, to])].sort();
             const locked = (task) => (second ? serializeSong(first, () => serializeSong(second, task)) : serializeSong(first, task));
-            return locked(async () => {
-              if (!fs.existsSync(fromPath)) return sendJson(res, 404, { code: 'not_found', message: 'Song not found' });
-              if (fs.existsSync(toPath)) return sendJson(res, 409, { code: 'already_exists', message: 'A song with that name already exists' });
-              await fs.promises.rename(fromPath, toPath);
-              const fromHistory = historyFolder(from);
-              const toHistory = historyFolder(to);
-              if (fs.existsSync(fromHistory)) {
-                if (!fs.existsSync(toHistory)) {
-                  await fs.promises.rename(fromHistory, toHistory);
-                } else {
-                  // A stale folder from an earlier life of the target name:
-                  // merge our snapshots into it so no history is orphaned.
-                  const snapshots = await fs.promises.readdir(fromHistory);
-                  await Promise.all(snapshots.map((file) => fs.promises.rename(path.join(fromHistory, file), path.join(toHistory, file))));
-                  await fs.promises.rm(fromHistory, { recursive: true, force: true });
-                }
-              }
-              return sendJson(res, 200, { name: to });
-            });
+            return locked(() => renameSong(res, { from, to, fromPath, toPath }));
           }
 
           const songMatch = url.pathname.match(/^\/api\/songs\/([^/]+)$/);
@@ -207,54 +263,21 @@ function songsApi() {
           if (!filePath) return sendJson(res, 400, { code: 'invalid_name', message: 'Use letters, numbers, spaces, hyphens or underscores' });
 
           if (req.method === 'GET') {
-            if (!fs.existsSync(filePath)) return sendJson(res, 404, { code: 'not_found', message: 'Song not found' });
-            const content = await fs.promises.readFile(filePath, 'utf8');
-            return sendText(res, 200, content, { ETag: versionOf(content), 'Cache-Control': 'no-store' });
+            return await readSong(res, filePath);
           }
 
           if (req.method === 'PUT') {
             const content = await readBody(req, MAX_SONG_BYTES);
-            return serializeSong(name, async () => {
-              const existing = fs.existsSync(filePath) ? await fs.promises.readFile(filePath, 'utf8') : null;
-              const currentVersion = existing == null ? null : versionOf(existing);
-              const expectedVersion = req.headers['if-match'];
-              if (expectedVersion && expectedVersion !== currentVersion) {
-                return sendJson(res, 409, {
-                  code: 'version_conflict',
-                  message: 'This song changed on disk after you opened it',
-                  currentVersion,
-                });
-              }
-              if (existing != null && existing !== content) await snapshotSong(name, existing);
-              await atomicWrite(filePath, content);
-              const version = versionOf(content);
-              return sendJson(res, 200, { ok: true, version }, { ETag: version });
-            });
+            return serializeSong(name, () => writeSong(req, res, name, filePath, content));
           }
 
           if (req.method === 'DELETE') {
-            return serializeSong(name, async () => {
-              if (!fs.existsSync(filePath)) return sendJson(res, 404, { code: 'not_found', message: 'Song not found' });
-              await fs.promises.mkdir(TRASH_DIR, { recursive: true });
-              await fs.promises.rename(filePath, path.join(TRASH_DIR, `${name}-${Date.now()}.strudel`));
-              // Retire the history folder alongside the song so a future song
-              // with the same name doesn't adopt this one's snapshots.
-              const historyPath = historyFolder(name);
-              if (fs.existsSync(historyPath)) {
-                await fs.promises.rename(historyPath, path.join(TRASH_DIR, `history-${path.basename(historyPath)}-${Date.now()}`));
-              }
-              return sendJson(res, 200, { ok: true, recoverable: true });
-            });
+            return serializeSong(name, () => trashSong(res, name, filePath));
           }
 
           return sendJson(res, 405, { code: 'method_not_allowed', message: 'Method not allowed' }, { Allow: 'GET, PUT, DELETE' });
         } catch (error) {
-          const status = error.statusCode || 500;
-          if (status >= 500) server.config.logger.error(error.stack || error.message);
-          return sendJson(res, status, {
-            code: error.code || 'server_error',
-            message: error.message || 'Server error',
-          });
+          return sendApiError(server, res, error);
         }
       });
     },

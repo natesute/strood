@@ -83,6 +83,69 @@ function resolveParams(moduleDefs, value) {
   return resolved;
 }
 
+// Build the listed modules, collecting their instances, nodes and cleanups
+function instantiateModules(ids, resolvedModules, ac, ctx, { instances, allNodes, cleanups }) {
+  for (const id of ids) {
+    const def = resolvedModules[id];
+    if (!def) continue;
+    const { factory } = getModuleFactory(def.type);
+    const instance = factory(ac, def.params, ctx);
+    instances.set(id, instance);
+
+    // Merge into superdough-compatible nodes map
+    if (instance.nodes) {
+      for (const [k, v] of Object.entries(instance.nodes)) {
+        allNodes[`${id}_${k}`] = v; // namespaced
+        if (!allNodes[k]) allNodes[k] = v; // first-come unnamespaced
+      }
+    }
+    if (instance.cleanup) cleanups.push(instance.cleanup);
+  }
+}
+
+// Wire signal routing
+function wireRouting(routing, instances) {
+  for (const [srcId, dstId] of routing) {
+    const src = instances.get(srcId);
+    const dst = instances.get(dstId);
+    if (src && dst && dst.inputNode) {
+      src.node.connect(dst.inputNode);
+    }
+  }
+}
+
+// Apply modulation matrix
+function applyModulationMatrix(matrix, instances, ac, cleanups) {
+  if (!matrix) return;
+  for (const mod of matrix) {
+    const modInstance = instances.get(mod.src);
+    // Parse "moduleId.paramName" from dst
+    const dotIdx = mod.dst.indexOf('.');
+    if (dotIdx === -1) continue;
+    const targetId = mod.dst.slice(0, dotIdx);
+    const paramName = mod.dst.slice(dotIdx + 1);
+
+    const targetInstance = instances.get(targetId);
+    if (!modInstance || !targetInstance) continue;
+
+    const targetParam = targetInstance.params?.[paramName];
+    if (!targetParam) {
+      console.warn(
+        `[synth-modules] Matrix target "${mod.dst}" not found — skipping`,
+      );
+      continue;
+    }
+
+    // Create a depth-scaling gain node between modulator output and target param
+    const depth = mod.depth ?? 1;
+    const depthNode = ac.createGain();
+    depthNode.gain.value = depth;
+    modInstance.node.connect(depthNode);
+    depthNode.connect(targetParam);
+    cleanups.push(() => releaseAudioNode(depthNode));
+  }
+}
+
 export function compilePatch(patchDef) {
   // Returns an onTrigger function compatible with superdough's registerSound
   return (t, value, onended) => {
@@ -112,80 +175,12 @@ export function compilePatch(patchDef) {
     const allNodes = {}; // superdough-compatible nodes map
     const cleanups = [];
 
-    // Instantiate signal modules in topo order
-    for (const id of sortedSignalIds) {
-      const def = resolvedModules[id];
-      if (!def) continue;
-      const { factory } = getModuleFactory(def.type);
-      const instance = factory(ac, def.params, ctx);
-      instances.set(id, instance);
+    // Signal modules in topo order, then modulators outside the chain
+    instantiateModules(sortedSignalIds, resolvedModules, ac, ctx, { instances, allNodes, cleanups });
+    instantiateModules(modulatorIds, resolvedModules, ac, ctx, { instances, allNodes, cleanups });
 
-      // Merge into superdough-compatible nodes map
-      if (instance.nodes) {
-        for (const [k, v] of Object.entries(instance.nodes)) {
-          allNodes[`${id}_${k}`] = v; // namespaced
-          if (!allNodes[k]) allNodes[k] = v; // first-come unnamespaced
-        }
-      }
-      if (instance.cleanup) cleanups.push(instance.cleanup);
-    }
-
-    // Instantiate modulator modules (not in signal chain)
-    for (const id of modulatorIds) {
-      const def = resolvedModules[id];
-      if (!def) continue;
-      const { factory } = getModuleFactory(def.type);
-      const instance = factory(ac, def.params, ctx);
-      instances.set(id, instance);
-
-      if (instance.nodes) {
-        for (const [k, v] of Object.entries(instance.nodes)) {
-          allNodes[`${id}_${k}`] = v;
-          if (!allNodes[k]) allNodes[k] = v;
-        }
-      }
-      if (instance.cleanup) cleanups.push(instance.cleanup);
-    }
-
-    // Wire signal routing
-    for (const [srcId, dstId] of patchDef.routing) {
-      const src = instances.get(srcId);
-      const dst = instances.get(dstId);
-      if (src && dst && dst.inputNode) {
-        src.node.connect(dst.inputNode);
-      }
-    }
-
-    // Apply modulation matrix
-    if (patchDef.matrix) {
-      for (const mod of patchDef.matrix) {
-        const modInstance = instances.get(mod.src);
-        // Parse "moduleId.paramName" from dst
-        const dotIdx = mod.dst.indexOf('.');
-        if (dotIdx === -1) continue;
-        const targetId = mod.dst.slice(0, dotIdx);
-        const paramName = mod.dst.slice(dotIdx + 1);
-
-        const targetInstance = instances.get(targetId);
-        if (!modInstance || !targetInstance) continue;
-
-        const targetParam = targetInstance.params?.[paramName];
-        if (!targetParam) {
-          console.warn(
-            `[synth-modules] Matrix target "${mod.dst}" not found — skipping`,
-          );
-          continue;
-        }
-
-        // Create a depth-scaling gain node between modulator output and target param
-        const depth = mod.depth ?? 1;
-        const depthNode = ac.createGain();
-        depthNode.gain.value = depth;
-        modInstance.node.connect(depthNode);
-        depthNode.connect(targetParam);
-        cleanups.push(() => releaseAudioNode(depthNode));
-      }
-    }
+    wireRouting(patchDef.routing, instances);
+    applyModulationMatrix(patchDef.matrix, instances, ac, cleanups);
 
     // Find terminal node (last in topo sort = output end of signal chain)
     const terminalId = sortedSignalIds[sortedSignalIds.length - 1];

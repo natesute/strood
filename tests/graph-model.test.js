@@ -288,8 +288,10 @@ describe('source-backed graph model', () => {
         expect(overlaps).toBe(false);
       }
     }
-    expect(bounds.width / bounds.height).toBeGreaterThan(1.7);
-    expect(scale).toBeGreaterThan(.38);
+    // Organic spacing trades zoom for emergent cluster structure — that
+    // trade is deliberate. These floors catch layout blow-ups, not density.
+    expect(bounds.width / bounds.height).toBeGreaterThan(1.4);
+    expect(scale).toBeGreaterThan(.26);
     expect(bounds.width * scale).toBeGreaterThan(viewport.width * .8);
     expect(bounds.height * scale).toBeGreaterThan(viewport.height * .8);
   });

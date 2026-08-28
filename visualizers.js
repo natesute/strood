@@ -338,6 +338,129 @@ registerWidget('_orbit', (id, options = {}, pat) => {
 /* ── Widget 3: _tonnetz — Harmonic Lattice ─────────────── */
 // x-axis = fifths (7 semitones), y-axis = major thirds (4 semitones).
 // Major triads = upward triangles, minor = downward. This is the topology of harmony.
+function tonnetzActivePCs(active) {
+  const activePCs = new Set();
+  for (const hap of active) {
+    try {
+      const freq = getFrequency(hap);
+      const midi = Math.round(freqToMidi(freq));
+      activePCs.add(((midi % 12) + 12) % 12);
+    } catch (_) {}
+  }
+  return activePCs;
+}
+
+// Grid connections (fifths horizontal, thirds vertical, diagonal)
+function paintTonnetzGrid(ctx, lattice, { ox, oy, spacingX, spacingY }) {
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const p of lattice) {
+    const px = ox + p.gx * spacingX;
+    const py = oy - p.gy * spacingY;
+    if (p.gx < 3) {
+      ctx.moveTo(px, py);
+      ctx.lineTo(ox + (p.gx + 1) * spacingX, py);
+    }
+    if (p.gy < 2) {
+      ctx.moveTo(px, py);
+      ctx.lineTo(px, oy - (p.gy + 1) * spacingY);
+    }
+    if (p.gx < 3 && p.gy > -2) {
+      ctx.moveTo(px, py);
+      ctx.lineTo(ox + (p.gx + 1) * spacingX, oy - (p.gy - 1) * spacingY);
+    }
+  }
+  ctx.stroke();
+}
+
+// Draw triangles for active triads
+function paintTonnetzTriads(ctx, pcToPositions, activePCs, { ox, oy, spacingX, spacingY }) {
+  if (activePCs.size < 3) return;
+  const pcArray = [...activePCs];
+  for (let i = 0; i < pcArray.length - 2; i++) {
+    for (let j = i + 1; j < pcArray.length - 1; j++) {
+      for (let k = j + 1; k < pcArray.length; k++) {
+        const trio = [pcArray[i], pcArray[j], pcArray[k]];
+        const sets = trio.map(pc => pcToPositions.get(pc) || []);
+        for (const a of sets[0]) {
+          for (const b of sets[1]) {
+            for (const c of sets[2]) {
+              const maxDist = Math.max(
+                Math.abs(a.gx - b.gx) + Math.abs(a.gy - b.gy),
+                Math.abs(b.gx - c.gx) + Math.abs(b.gy - c.gy),
+                Math.abs(a.gx - c.gx) + Math.abs(a.gy - c.gy)
+              );
+              if (maxDist <= 2) {
+                ctx.fillStyle = 'rgba(180, 120, 255, 0.12)';
+                ctx.beginPath();
+                ctx.moveTo(ox + a.gx * spacingX, oy - a.gy * spacingY);
+                ctx.lineTo(ox + b.gx * spacingX, oy - b.gy * spacingY);
+                ctx.lineTo(ox + c.gx * spacingX, oy - c.gy * spacingY);
+                ctx.closePath();
+                ctx.fill();
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Lattice dots — batched by style to reduce state changes
+function paintTonnetzDots(ctx, lattice, activePCs, { ox, oy, spacingX, spacingY }) {
+  // 1) Inactive dots
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+  ctx.beginPath();
+  for (const p of lattice) {
+    if (activePCs.has(p.pc)) continue;
+    const px = ox + p.gx * spacingX;
+    const py = oy - p.gy * spacingY;
+    ctx.moveTo(px + 4, py);
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+  }
+  ctx.fill();
+
+  // 2) Active glow
+  ctx.fillStyle = 'rgba(180, 120, 255, 0.3)';
+  ctx.beginPath();
+  for (const p of lattice) {
+    if (!activePCs.has(p.pc)) continue;
+    const px = ox + p.gx * spacingX;
+    const py = oy - p.gy * spacingY;
+    ctx.moveTo(px + 14, py);
+    ctx.arc(px, py, 14, 0, Math.PI * 2);
+  }
+  ctx.fill();
+
+  // 3) Active dots
+  ctx.fillStyle = '#bb88ff';
+  ctx.beginPath();
+  for (const p of lattice) {
+    if (!activePCs.has(p.pc)) continue;
+    const px = ox + p.gx * spacingX;
+    const py = oy - p.gy * spacingY;
+    ctx.moveTo(px + 8, py);
+    ctx.arc(px, py, 8, 0, Math.PI * 2);
+  }
+  ctx.fill();
+}
+
+// 4) Active labels
+function paintTonnetzLabels(ctx, lattice, activePCs, noteNames, w, { ox, oy, spacingX, spacingY }) {
+  if (activePCs.size === 0) return;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+  ctx.font = `${Math.round(w / 25)}px monospace`;
+  ctx.textAlign = 'center';
+  for (const p of lattice) {
+    if (!activePCs.has(p.pc)) continue;
+    const px = ox + p.gx * spacingX;
+    const py = oy - p.gy * spacingY;
+    ctx.fillText(noteNames[p.pc], px, py - 12);
+  }
+}
+
 registerWidget('_tonnetz', (id, options = {}, pat) => {
   const size = options.size || 250;
   options = { width: size, height: size, ...options };
@@ -365,129 +488,14 @@ registerWidget('_tonnetz', (id, options = {}, pat) => {
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
 
-    const activePCs = new Set();
-    for (const hap of active) {
-      try {
-        const freq = getFrequency(hap);
-        const midi = Math.round(freqToMidi(freq));
-        activePCs.add(((midi % 12) + 12) % 12);
-      } catch (_) {}
-    }
+    const activePCs = tonnetzActivePCs(active);
 
-    const spacingX = w / 8;
-    const spacingY = h / 6;
-    const ox = w / 2, oy = h / 2;
+    const geom = { ox: w / 2, oy: h / 2, spacingX: w / 8, spacingY: h / 6 };
 
-    // Grid connections (fifths horizontal, thirds vertical, diagonal)
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (const p of lattice) {
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      if (p.gx < 3) {
-        ctx.moveTo(px, py);
-        ctx.lineTo(ox + (p.gx + 1) * spacingX, py);
-      }
-      if (p.gy < 2) {
-        ctx.moveTo(px, py);
-        ctx.lineTo(px, oy - (p.gy + 1) * spacingY);
-      }
-      if (p.gx < 3 && p.gy > -2) {
-        ctx.moveTo(px, py);
-        ctx.lineTo(ox + (p.gx + 1) * spacingX, oy - (p.gy - 1) * spacingY);
-      }
-    }
-    ctx.stroke();
-
-    // Draw triangles for active triads
-    if (activePCs.size >= 3) {
-      const pcArray = [...activePCs];
-      for (let i = 0; i < pcArray.length - 2; i++) {
-        for (let j = i + 1; j < pcArray.length - 1; j++) {
-          for (let k = j + 1; k < pcArray.length; k++) {
-            const trio = [pcArray[i], pcArray[j], pcArray[k]];
-            const sets = trio.map(pc => pcToPositions.get(pc) || []);
-            for (const a of sets[0]) {
-              for (const b of sets[1]) {
-                for (const c of sets[2]) {
-                  const maxDist = Math.max(
-                    Math.abs(a.gx - b.gx) + Math.abs(a.gy - b.gy),
-                    Math.abs(b.gx - c.gx) + Math.abs(b.gy - c.gy),
-                    Math.abs(a.gx - c.gx) + Math.abs(a.gy - c.gy)
-                  );
-                  if (maxDist <= 2) {
-                    ctx.fillStyle = 'rgba(180, 120, 255, 0.12)';
-                    ctx.beginPath();
-                    ctx.moveTo(ox + a.gx * spacingX, oy - a.gy * spacingY);
-                    ctx.lineTo(ox + b.gx * spacingX, oy - b.gy * spacingY);
-                    ctx.lineTo(ox + c.gx * spacingX, oy - c.gy * spacingY);
-                    ctx.closePath();
-                    ctx.fill();
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Lattice dots
-    for (const p of lattice) {
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-    }
-
-    // Lattice dots — batched by style to reduce state changes
-    // 1) Inactive dots
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
-    ctx.beginPath();
-    for (const p of lattice) {
-      if (activePCs.has(p.pc)) continue;
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      ctx.moveTo(px + 4, py);
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-    }
-    ctx.fill();
-
-    // 2) Active glow
-    ctx.fillStyle = 'rgba(180, 120, 255, 0.3)';
-    ctx.beginPath();
-    for (const p of lattice) {
-      if (!activePCs.has(p.pc)) continue;
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      ctx.moveTo(px + 14, py);
-      ctx.arc(px, py, 14, 0, Math.PI * 2);
-    }
-    ctx.fill();
-
-    // 3) Active dots
-    ctx.fillStyle = '#bb88ff';
-    ctx.beginPath();
-    for (const p of lattice) {
-      if (!activePCs.has(p.pc)) continue;
-      const px = ox + p.gx * spacingX;
-      const py = oy - p.gy * spacingY;
-      ctx.moveTo(px + 8, py);
-      ctx.arc(px, py, 8, 0, Math.PI * 2);
-    }
-    ctx.fill();
-
-    // 4) Active labels
-    if (activePCs.size > 0) {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.font = `${Math.round(w / 25)}px monospace`;
-      ctx.textAlign = 'center';
-      for (const p of lattice) {
-        if (!activePCs.has(p.pc)) continue;
-        const px = ox + p.gx * spacingX;
-        const py = oy - p.gy * spacingY;
-        ctx.fillText(noteNames[p.pc], px, py - 12);
-      }
-    }
+    paintTonnetzGrid(ctx, lattice, geom);
+    paintTonnetzTriads(ctx, pcToPositions, activePCs, geom);
+    paintTonnetzDots(ctx, lattice, activePCs, geom);
+    paintTonnetzLabels(ctx, lattice, activePCs, noteNames, w, geom);
   });
 });
 

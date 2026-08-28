@@ -110,57 +110,73 @@ function nextCodeLine(code, from) {
   return null;
 }
 
+function createScanState() {
+  return { quote: '', escaped: false, lineComment: false, blockComment: false };
+}
+
+// Advances the comment/string state over one character. Returns the extra
+// characters it swallowed, or -1 when the character is ordinary code.
+function skipCommentsAndStrings(state, char, next) {
+  if (state.lineComment) {
+    if (char === '\n') state.lineComment = false;
+    return 0;
+  }
+  if (state.blockComment) {
+    if (char === '*' && next === '/') {
+      state.blockComment = false;
+      return 1;
+    }
+    return 0;
+  }
+  if (state.quote) {
+    if (state.escaped) state.escaped = false;
+    else if (char === '\\') state.escaped = true;
+    else if (char === state.quote) state.quote = '';
+    return 0;
+  }
+  if (char === '/' && next === '/') {
+    state.lineComment = true;
+    return 1;
+  }
+  if (char === '/' && next === '*') {
+    state.blockComment = true;
+    return 1;
+  }
+  if (char === '"' || char === "'" || char === '`') {
+    state.quote = char;
+    return 0;
+  }
+  return -1;
+}
+
+function countBrackets(depths, char) {
+  if (char === '(') depths.round++;
+  else if (char === ')') depths.round = Math.max(0, depths.round - 1);
+  else if (char === '[') depths.square++;
+  else if (char === ']') depths.square = Math.max(0, depths.square - 1);
+  else if (char === '{') depths.curly++;
+  else if (char === '}') depths.curly = Math.max(0, depths.curly - 1);
+}
+
 function declarationEnd(code, expressionStart) {
-  let round = 0;
-  let square = 0;
-  let curly = 0;
-  let quote = '';
-  let escaped = false;
-  let lineComment = false;
-  let blockComment = false;
+  const depths = { round: 0, square: 0, curly: 0 };
+  const state = createScanState();
 
   for (let cursor = expressionStart; cursor < code.length; cursor++) {
     const char = code[cursor];
     const next = code[cursor + 1];
-    if (lineComment) {
-      if (char === '\n') lineComment = false;
-      else continue;
-    }
-    if (blockComment) {
-      if (char === '*' && next === '/') {
-        blockComment = false;
-        cursor++;
+    // The newline that closes a line comment is still a candidate break.
+    if (state.lineComment && char === '\n') state.lineComment = false;
+    else {
+      const skipped = skipCommentsAndStrings(state, char, next);
+      if (skipped >= 0) {
+        cursor += skipped;
+        continue;
       }
-      continue;
     }
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === quote) quote = '';
-      continue;
-    }
-    if (char === '/' && next === '/') {
-      lineComment = true;
-      cursor++;
-      continue;
-    }
-    if (char === '/' && next === '*') {
-      blockComment = true;
-      cursor++;
-      continue;
-    }
-    if (char === '"' || char === "'" || char === '`') {
-      quote = char;
-      continue;
-    }
-    if (char === '(') round++;
-    else if (char === ')') round = Math.max(0, round - 1);
-    else if (char === '[') square++;
-    else if (char === ']') square = Math.max(0, square - 1);
-    else if (char === '{') curly++;
-    else if (char === '}') curly = Math.max(0, curly - 1);
+    countBrackets(depths, char);
 
-    if (char !== '\n' || round || square || curly) continue;
+    if (char !== '\n' || depths.round || depths.square || depths.curly) continue;
     const previous = code.slice(expressionStart, cursor).trimEnd();
     // Look past comment lines so a chain that resumes after `// note` still
     // belongs to this declaration.
@@ -200,42 +216,12 @@ export function parseDeclarations(code) {
 
 function matchingParen(code, open) {
   let depth = 0;
-  let quote = '';
-  let escaped = false;
-  let lineComment = false;
-  let blockComment = false;
+  const state = createScanState();
   for (let cursor = open; cursor < code.length; cursor++) {
     const char = code[cursor];
-    const next = code[cursor + 1];
-    if (lineComment) {
-      if (char === '\n') lineComment = false;
-      continue;
-    }
-    if (blockComment) {
-      if (char === '*' && next === '/') {
-        blockComment = false;
-        cursor++;
-      }
-      continue;
-    }
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === quote) quote = '';
-      continue;
-    }
-    if (char === '/' && next === '/') {
-      lineComment = true;
-      cursor++;
-      continue;
-    }
-    if (char === '/' && next === '*') {
-      blockComment = true;
-      cursor++;
-      continue;
-    }
-    if (char === '"' || char === "'" || char === '`') {
-      quote = char;
+    const skipped = skipCommentsAndStrings(state, char, code[cursor + 1]);
+    if (skipped >= 0) {
+      cursor += skipped;
       continue;
     }
     if (char === '(') depth++;
@@ -336,6 +322,70 @@ function patternRole(declaration) {
   return /\barrange\s*\(/.test(declaration.text) ? 'arrangement' : 'phrase';
 }
 
+function arrangementBracketEnd(body, open) {
+  const state = createScanState();
+  let depth = 1;
+  let end = open + 1;
+  for (; end < body.length && depth; end += 1) {
+    const inner = body[end];
+    const skipped = skipCommentsAndStrings(state, inner, body[end + 1]);
+    if (skipped >= 0) {
+      end += skipped;
+      continue;
+    }
+    if (inner === '[') depth += 1;
+    else if (inner === ']') depth -= 1;
+  }
+  return end;
+}
+
+function parseArrangementBracket(text) {
+  const entry = text.match(/^\[\s*(\d+(?:\.\d+)?)\s*,([\s\S]*)\]$/);
+  const duration = Number(entry?.[1]);
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  return {
+    duration,
+    dependency: entry[2].trim().match(/^([A-Za-z_$][A-Za-z0-9_$]*)$/)?.[1] || null,
+    compactHead: text.match(/^\[\s*\d+(?:\.\d+)?\s*,\s*[A-Za-z_$][A-Za-z0-9_$]*/)?.[0],
+  };
+}
+
+function arrangementLane(body, bodyStart, lane) {
+  const laneEntries = [];
+  const state = createScanState();
+  const depths = { round: 0, square: 0, curly: 0 };
+  let cursor = 0;
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    const skipped = skipCommentsAndStrings(state, char, body[index + 1]);
+    if (skipped >= 0) {
+      index += skipped;
+      continue;
+    }
+    countBrackets(depths, char);
+    if (char !== '[' || depths.round || depths.curly) continue;
+
+    const end = arrangementBracketEnd(body, index);
+    const bracket = parseArrangementBracket(body.slice(index, end));
+    if (!bracket) continue;
+    laneEntries.push({
+      lane,
+      from: bodyStart + index,
+      to: bodyStart + end,
+      highlightFrom: bodyStart + index,
+      highlightTo: bracket.dependency
+        ? bodyStart + end
+        : bodyStart + index + Math.max(1, bracket.compactHead?.length || 1),
+      start: cursor,
+      end: cursor + bracket.duration,
+      dependency: bracket.dependency,
+    });
+    cursor += bracket.duration;
+    index = end - 1;
+  }
+  return { laneEntries, laneLength: cursor };
+}
+
 export function findArrangementEntries(source) {
   const entries = [];
   const comments = commentRanges(source);
@@ -347,115 +397,105 @@ export function findArrangementEntries(source) {
     const close = matchingParen(source, open);
     const bodyStart = open + 1;
     const body = source.slice(bodyStart, Math.max(bodyStart, close - 1));
-    const laneEntries = [];
-    let cursor = 0;
-    let quote = '';
-    let escaped = false;
-    let round = 0;
-    let curly = 0;
-    let lineComment = false;
-    let blockComment = false;
-    for (let index = 0; index < body.length; index += 1) {
-      const char = body[index];
-      const next = body[index + 1];
-      if (lineComment) {
-        if (char === '\n') lineComment = false;
-        continue;
-      }
-      if (blockComment) {
-        if (char === '*' && next === '/') {
-          blockComment = false;
-          index += 1;
-        }
-        continue;
-      }
-      if (quote) {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === quote) quote = '';
-        continue;
-      }
-      if (char === '/' && next === '/') {
-        lineComment = true;
-        index += 1;
-        continue;
-      }
-      if (char === '/' && next === '*') {
-        blockComment = true;
-        index += 1;
-        continue;
-      }
-      if (char === '"' || char === "'" || char === '`') {
-        quote = char;
-        continue;
-      }
-      if (char === '(') round += 1;
-      else if (char === ')') round = Math.max(0, round - 1);
-      else if (char === '{') curly += 1;
-      else if (char === '}') curly = Math.max(0, curly - 1);
-      if (char !== '[' || round || curly) continue;
-
-      let depth = 1;
-      let innerQuote = '';
-      let innerEscaped = false;
-      let innerLineComment = false;
-      let innerBlockComment = false;
-      let end = index + 1;
-      for (; end < body.length && depth; end += 1) {
-        const inner = body[end];
-        const innerNext = body[end + 1];
-        if (innerLineComment) {
-          if (inner === '\n') innerLineComment = false;
-          continue;
-        }
-        if (innerBlockComment) {
-          if (inner === '*' && innerNext === '/') {
-            innerBlockComment = false;
-            end += 1;
-          }
-          continue;
-        }
-        if (innerQuote) {
-          if (innerEscaped) innerEscaped = false;
-          else if (inner === '\\') innerEscaped = true;
-          else if (inner === innerQuote) innerQuote = '';
-          continue;
-        }
-        if (inner === '/' && innerNext === '/') {
-          innerLineComment = true;
-          end += 1;
-        } else if (inner === '/' && innerNext === '*') {
-          innerBlockComment = true;
-          end += 1;
-        } else if (inner === '"' || inner === "'" || inner === '`') innerQuote = inner;
-        else if (inner === '[') depth += 1;
-        else if (inner === ']') depth -= 1;
-      }
-      const text = body.slice(index, end);
-      const entry = text.match(/^\[\s*(\d+(?:\.\d+)?)\s*,([\s\S]*)\]$/);
-      const duration = Number(entry?.[1]);
-      if (!Number.isFinite(duration) || duration <= 0) continue;
-      const dependency = entry[2].trim().match(/^([A-Za-z_$][A-Za-z0-9_$]*)$/)?.[1] || null;
-      const compactHead = text.match(/^\[\s*\d+(?:\.\d+)?\s*,\s*[A-Za-z_$][A-Za-z0-9_$]*/)?.[0];
-      laneEntries.push({
-        lane,
-        from: bodyStart + index,
-        to: bodyStart + end,
-        highlightFrom: bodyStart + index,
-        highlightTo: dependency
-          ? bodyStart + end
-          : bodyStart + index + Math.max(1, compactHead?.length || 1),
-        start: cursor,
-        end: cursor + duration,
-        dependency,
-      });
-      cursor += duration;
-      index = end - 1;
-    }
-    for (const entry of laneEntries) entries.push({ ...entry, laneLength: cursor });
+    const { laneEntries, laneLength } = arrangementLane(body, bodyStart, lane);
+    for (const entry of laneEntries) entries.push({ ...entry, laneLength });
     lane += 1;
   }
   return entries;
+}
+
+function assignVisualizerTargets(visualizers, tracks) {
+  for (const visualizer of visualizers) {
+    if (visualizer.target) continue;
+    const owner = tracks.find((track) => visualizer.from >= track.start && visualizer.to <= track.end);
+    if (owner?.primary) visualizer.target = owner.primary;
+  }
+
+  for (const visualizer of visualizers) {
+    visualizer.sourceTarget = visualizer.target;
+    const owner = tracks.find((track) => (
+      track.declaration?.name === visualizer.target
+      || track.primary === visualizer.target
+      || track.notes.some(({ name }) => name === visualizer.target)
+    ));
+    if (!owner?.declaration) continue;
+    visualizer.target = owner.declaration.name;
+    visualizer.trackKey = owner.key;
+  }
+}
+
+// Source-order IDs made every later visualiser look like a different node
+// whenever a new call was inserted earlier in the song. Scope identity to
+// the connected declaration and method so unrelated node layouts stay put.
+function assignVisualizerIds(visualizers) {
+  const visualizerCounts = new Map();
+  for (const visualizer of visualizers) {
+    const key = `${visualizer.sourceTarget || visualizer.target || 'unattached'}:${visualizer.method}`;
+    const index = visualizerCounts.get(key) || 0;
+    visualizerCounts.set(key, index + 1);
+    visualizer.id = `visualizer:${key}:${index}`;
+  }
+}
+
+function collectCodeNodes(tracks, soloKey) {
+  const codeNodes = new Map();
+  for (const track of tracks) {
+    if (track.declaration) {
+      const arrangementEntries = findArrangementEntries(track.declaration.text);
+      codeNodes.set(track.declaration.name, {
+        ...track.declaration,
+        kind: 'declaration',
+        role: 'track',
+        arrangementEntries,
+        trackKey: track.key,
+        trackName: track.name,
+        color: track.color,
+        canMute: Boolean(track.mixDeclaration),
+        muted: track.muted,
+        canSolo: soloKey !== null,
+        soloed: soloKey === track.key,
+      });
+    }
+    for (const note of track.notes) {
+      if (!codeNodes.has(note.name)) {
+        const role = patternRole(note);
+        codeNodes.set(note.name, {
+          ...note,
+          kind: 'notes',
+          role,
+          arrangementEntries: role === 'arrangement' ? findArrangementEntries(note.text) : [],
+          trackKey: track.key,
+          trackName: track.name,
+          color: track.color,
+        });
+      }
+    }
+  }
+  return codeNodes;
+}
+
+function collectEdges(tracks, visualizers, codeNodes) {
+  const edges = [];
+  const edgeIds = new Set();
+  for (const track of tracks) {
+    if (!track.declaration) continue;
+    const patternNames = new Set(track.notes.map(({ name }) => name));
+    for (const parent of [track.declaration, ...track.notes]) {
+      for (const child of parent.dependencies || []) {
+        if (!patternNames.has(child)) continue;
+        const id = `edge:${parent.name}:${child}`;
+        if (edgeIds.has(id)) continue;
+        edgeIds.add(id);
+        edges.push({ id, from: parent.name, to: child });
+      }
+    }
+  }
+  for (const visualizer of visualizers) {
+    if (visualizer.target && codeNodes.has(visualizer.target)) {
+      edges.push({ id: `edge:${visualizer.target}:${visualizer.id}`, from: visualizer.target, to: visualizer.id });
+    }
+  }
+  return edges;
 }
 
 export function buildSongGraph(code) {
@@ -496,89 +536,11 @@ export function buildSongGraph(code) {
   ];
   const visualizers = findVisualizerCalls(code, declarations);
 
-  for (const visualizer of visualizers) {
-    if (visualizer.target) continue;
-    const owner = tracks.find((track) => visualizer.from >= track.start && visualizer.to <= track.end);
-    if (owner?.primary) visualizer.target = owner.primary;
-  }
+  assignVisualizerTargets(visualizers, tracks);
+  assignVisualizerIds(visualizers);
 
-  for (const visualizer of visualizers) {
-    visualizer.sourceTarget = visualizer.target;
-    const owner = tracks.find((track) => (
-      track.declaration?.name === visualizer.target
-      || track.primary === visualizer.target
-      || track.notes.some(({ name }) => name === visualizer.target)
-    ));
-    if (!owner?.declaration) continue;
-    visualizer.target = owner.declaration.name;
-    visualizer.trackKey = owner.key;
-  }
-
-  // Source-order IDs made every later visualiser look like a different node
-  // whenever a new call was inserted earlier in the song. Scope identity to
-  // the connected declaration and method so unrelated node layouts stay put.
-  const visualizerCounts = new Map();
-  for (const visualizer of visualizers) {
-    const key = `${visualizer.sourceTarget || visualizer.target || 'unattached'}:${visualizer.method}`;
-    const index = visualizerCounts.get(key) || 0;
-    visualizerCounts.set(key, index + 1);
-    visualizer.id = `visualizer:${key}:${index}`;
-  }
-
-  const codeNodes = new Map();
-  for (const track of tracks) {
-    if (track.declaration) {
-      const arrangementEntries = findArrangementEntries(track.declaration.text);
-      codeNodes.set(track.declaration.name, {
-        ...track.declaration,
-        kind: 'declaration',
-        role: 'track',
-        arrangementEntries,
-        trackKey: track.key,
-        trackName: track.name,
-        color: track.color,
-        canMute: Boolean(track.mixDeclaration),
-        muted: track.muted,
-        canSolo: soloKey !== null,
-        soloed: soloKey === track.key,
-      });
-    }
-    for (const note of track.notes) {
-      if (!codeNodes.has(note.name)) {
-        const role = patternRole(note);
-        codeNodes.set(note.name, {
-          ...note,
-          kind: 'notes',
-          role,
-          arrangementEntries: role === 'arrangement' ? findArrangementEntries(note.text) : [],
-          trackKey: track.key,
-          trackName: track.name,
-          color: track.color,
-        });
-      }
-    }
-  }
-
-  const edges = [];
-  const edgeIds = new Set();
-  for (const track of tracks) {
-    if (!track.declaration) continue;
-    const patternNames = new Set(track.notes.map(({ name }) => name));
-    for (const parent of [track.declaration, ...track.notes]) {
-      for (const child of parent.dependencies || []) {
-        if (!patternNames.has(child)) continue;
-        const id = `edge:${parent.name}:${child}`;
-        if (edgeIds.has(id)) continue;
-        edgeIds.add(id);
-        edges.push({ id, from: parent.name, to: child });
-      }
-    }
-  }
-  for (const visualizer of visualizers) {
-    if (visualizer.target && codeNodes.has(visualizer.target)) {
-      edges.push({ id: `edge:${visualizer.target}:${visualizer.id}`, from: visualizer.target, to: visualizer.id });
-    }
-  }
+  const codeNodes = collectCodeNodes(tracks, soloKey);
+  const edges = collectEdges(tracks, visualizers, codeNodes);
 
   return { tracks, declarations, codeNodes: [...codeNodes.values()], visualizers, edges, soloKey };
 }

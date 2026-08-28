@@ -501,6 +501,89 @@ function createKnob(moduleId, paramName, value, min, max, onInput) {
   return svg;
 }
 
+// ── Node body ────────────────────────────────────────────
+function appendNodeVisuals(body, id, def, cat) {
+  if (def.type === 'env') body.appendChild(createEnvelopeDisplay(id, def));
+  if (def.type === 'lfo') body.appendChild(createLfoDisplay(def));
+  if (cat === 'source' && ['sine', 'triangle', 'square', 'sawtooth', 'supersaw', 'noise'].includes(def.type)) {
+    const wfSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    wfSvg.setAttribute('viewBox', '0 0 140 28');
+    wfSvg.setAttribute('class', 'pe-waveform');
+    wfSvg.setAttribute('preserveAspectRatio', 'none');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', waveformPath(def.type, 140, 28));
+    path.setAttribute('class', 'pe-waveform-path');
+    wfSvg.appendChild(path);
+    body.appendChild(wfSvg);
+  }
+}
+
+function appendNodeKnobs(body, id, def, meta) {
+  if (!meta?.params) return;
+  const knobs = document.createElement('div');
+  knobs.className = 'pe-knobs';
+  for (const [paramName, paramMeta] of Object.entries(meta.params)) {
+    if (paramMeta.values) {
+      const enumWrap = document.createElement('div');
+      enumWrap.className = 'pe-enum';
+      const label = document.createElement('span');
+      label.className = 'pe-enum-label';
+      label.textContent = paramName;
+      const select = document.createElement('select');
+      select.className = 'pe-enum-select';
+      select.setAttribute('aria-label', `${id} ${paramName}`);
+      paramMeta.values.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v; opt.textContent = v;
+        if (def.params[paramName] === v) opt.selected = true;
+        select.appendChild(opt);
+      });
+      select.onchange = () => { def.params[paramName] = select.value; commitPatch(); };
+      select.addEventListener('mousedown', (e) => e.stopPropagation());
+      enumWrap.append(label, select);
+      body.appendChild(enumWrap);
+    } else {
+      const min = paramMeta.min ?? 0, max = paramMeta.max ?? 1;
+      const val = def.params[paramName] ?? paramMeta.default ?? min;
+      const wrap = document.createElement('div');
+      wrap.className = 'pe-knob-wrap';
+      wrap.dataset.target = `${id}.${paramName}`;
+
+      const label = document.createElement('div');
+      label.className = 'pe-knob-label';
+      label.textContent = paramName;
+      const valueEl = document.createElement('div');
+      valueEl.className = 'pe-knob-value';
+      valueEl.textContent = fmt(val);
+
+      const svg = createKnob(id, paramName, val, min, max, (newVal) => {
+        def.params[paramName] = newVal;
+        valueEl.textContent = fmt(newVal);
+        commitPatch();
+      });
+
+      // Param port (modulation target)
+      const paramPort = document.createElement('div');
+      paramPort.className = 'pe-port-param';
+      paramPort.dataset.paramTarget = `${id}.${paramName}`;
+      paramPort.tabIndex = 0;
+      paramPort.setAttribute('role', 'button');
+      paramPort.setAttribute('aria-label', `${id} ${paramName} modulation input`);
+      paramPort.addEventListener('mousedown', (e) => e.stopPropagation());
+      paramPort.addEventListener('mouseup', (e) => {
+        e.stopPropagation();
+        if (dragWire) {
+          finishModConnection(`${id}.${paramName}`);
+        }
+      });
+
+      wrap.append(svg, paramPort, label, valueEl);
+      knobs.appendChild(wrap);
+    }
+  }
+  body.appendChild(knobs);
+}
+
 // ── Create module node ───────────────────────────────────
 function createNode(id) {
   const def = patchDef.modules[id];
@@ -578,86 +661,8 @@ function createNode(id) {
   const body = document.createElement('div');
   body.className = 'pe-node-body';
 
-  // Visualizations
-  if (def.type === 'env') body.appendChild(createEnvelopeDisplay(id, def));
-  if (def.type === 'lfo') body.appendChild(createLfoDisplay(def));
-  if (cat === 'source' && ['sine', 'triangle', 'square', 'sawtooth', 'supersaw', 'noise'].includes(def.type)) {
-    const wfSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    wfSvg.setAttribute('viewBox', '0 0 140 28');
-    wfSvg.setAttribute('class', 'pe-waveform');
-    wfSvg.setAttribute('preserveAspectRatio', 'none');
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', waveformPath(def.type, 140, 28));
-    path.setAttribute('class', 'pe-waveform-path');
-    wfSvg.appendChild(path);
-    body.appendChild(wfSvg);
-  }
-
-  // Knobs
-  if (meta?.params) {
-    const knobs = document.createElement('div');
-    knobs.className = 'pe-knobs';
-    for (const [paramName, paramMeta] of Object.entries(meta.params)) {
-      if (paramMeta.values) {
-        const enumWrap = document.createElement('div');
-        enumWrap.className = 'pe-enum';
-        const label = document.createElement('span');
-        label.className = 'pe-enum-label';
-        label.textContent = paramName;
-        const select = document.createElement('select');
-        select.className = 'pe-enum-select';
-        select.setAttribute('aria-label', `${id} ${paramName}`);
-        paramMeta.values.forEach(v => {
-          const opt = document.createElement('option');
-          opt.value = v; opt.textContent = v;
-          if (def.params[paramName] === v) opt.selected = true;
-          select.appendChild(opt);
-        });
-        select.onchange = () => { def.params[paramName] = select.value; commitPatch(); };
-        select.addEventListener('mousedown', (e) => e.stopPropagation());
-        enumWrap.append(label, select);
-        body.appendChild(enumWrap);
-      } else {
-        const min = paramMeta.min ?? 0, max = paramMeta.max ?? 1;
-        const val = def.params[paramName] ?? paramMeta.default ?? min;
-        const wrap = document.createElement('div');
-        wrap.className = 'pe-knob-wrap';
-        wrap.dataset.target = `${id}.${paramName}`;
-
-        const label = document.createElement('div');
-        label.className = 'pe-knob-label';
-        label.textContent = paramName;
-        const valueEl = document.createElement('div');
-        valueEl.className = 'pe-knob-value';
-        valueEl.textContent = fmt(val);
-
-        const svg = createKnob(id, paramName, val, min, max, (newVal) => {
-          def.params[paramName] = newVal;
-          valueEl.textContent = fmt(newVal);
-          commitPatch();
-        });
-
-        // Param port (modulation target)
-        const paramPort = document.createElement('div');
-        paramPort.className = 'pe-port-param';
-        paramPort.dataset.paramTarget = `${id}.${paramName}`;
-        paramPort.tabIndex = 0;
-        paramPort.setAttribute('role', 'button');
-        paramPort.setAttribute('aria-label', `${id} ${paramName} modulation input`);
-        paramPort.addEventListener('mousedown', (e) => e.stopPropagation());
-        paramPort.addEventListener('mouseup', (e) => {
-          e.stopPropagation();
-          if (dragWire) {
-            finishModConnection(`${id}.${paramName}`);
-          }
-        });
-
-        wrap.append(svg, paramPort, label, valueEl);
-        knobs.appendChild(wrap);
-      }
-    }
-    body.appendChild(knobs);
-  }
+  appendNodeVisuals(body, id, def, cat);
+  appendNodeKnobs(body, id, def, meta);
 
   node.appendChild(body);
 

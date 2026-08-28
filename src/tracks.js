@@ -14,6 +14,35 @@ function safeTrackColor(value, fallback) {
   return fallback;
 }
 
+/** Trim the trailing blank lines and heading comment that belong to the next track. */
+function trackEndLine(lines, lineIndex, nextTrackLine) {
+  let endLine = nextTrackLine;
+  if (nextTrackLine >= lines.length) return endLine;
+  while (endLine > lineIndex + 1 && !lines[endLine - 1].trim()) endLine--;
+  const possibleHeader = lines[endLine - 1]?.trim() || '';
+  if (/^\/\/\s*[A-Za-z][A-Za-z0-9 _-]*$/.test(possibleHeader) || TRACK_DIRECTIVE.test(possibleHeader)) endLine--;
+  while (endLine > lineIndex + 1 && !lines[endLine - 1].trim()) endLine--;
+  return endLine;
+}
+
+/** Read the nearest comment above a track as its `@track` directive or plain label. */
+function trackHeading(lines, lineIndex) {
+  for (let cursor = lineIndex - 1; cursor >= 0; cursor--) {
+    const text = lines[cursor].trim();
+    if (!text) continue;
+    const directive = text.match(TRACK_DIRECTIVE);
+    if (directive) {
+      return {
+        label: directive[2]?.trim() || directive[1].replace(/[-_]/g, ' '),
+        explicitKey: directive[1],
+      };
+    }
+    const match = text.match(/^\/\/\s*([A-Za-z][A-Za-z0-9 _-]*)$/);
+    return { label: match ? match[1].trim() : '', explicitKey: '' };
+  }
+  return { label: '', explicitKey: '' };
+}
+
 export function parseTracks(code) {
   const lines = code.split('\n');
   const offsets = [];
@@ -27,28 +56,8 @@ export function parseTracks(code) {
 
   return starts.map((lineIndex, index) => {
     const nextTrackLine = starts[index + 1] ?? lines.length;
-    let endLine = nextTrackLine;
-    if (nextTrackLine < lines.length) {
-      while (endLine > lineIndex + 1 && !lines[endLine - 1].trim()) endLine--;
-      const possibleHeader = lines[endLine - 1]?.trim() || '';
-      if (/^\/\/\s*[A-Za-z][A-Za-z0-9 _-]*$/.test(possibleHeader) || TRACK_DIRECTIVE.test(possibleHeader)) endLine--;
-      while (endLine > lineIndex + 1 && !lines[endLine - 1].trim()) endLine--;
-    }
-    let label = '';
-    let explicitKey = '';
-    for (let cursor = lineIndex - 1; cursor >= 0; cursor--) {
-      const text = lines[cursor].trim();
-      if (!text) continue;
-      const directive = text.match(TRACK_DIRECTIVE);
-      if (directive) {
-        explicitKey = directive[1];
-        label = directive[2]?.trim() || directive[1].replace(/[-_]/g, ' ');
-        break;
-      }
-      const match = text.match(/^\/\/\s*([A-Za-z][A-Za-z0-9 _-]*)$/);
-      if (match) label = match[1].trim();
-      break;
-    }
+    const endLine = trackEndLine(lines, lineIndex, nextTrackLine);
+    const { label, explicitKey } = trackHeading(lines, lineIndex);
     const block = lines.slice(lineIndex, endLine).join('\n').replace(/\n+$/, '');
     const sourceLabel = lines[lineIndex].match(TRACK_START)?.[1];
     const name = label || sourceLabel || `Track ${index + 1}`;

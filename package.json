@@ -9,7 +9,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "check": "npm run test && npm run build && npm run test:e2e"
+    "lint": "eslint .",
+    "check": "npm run lint && npm run test && npm run build && npm run test:e2e"
   },
   "keywords": [],
   "author": "",
@@ -28,6 +29,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.62.1",
+    "eslint": "^10.9.1",
     "vitest": "^4.1.11"
   }
 }
