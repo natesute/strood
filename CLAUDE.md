@@ -10,7 +10,7 @@ visualisers rendered inline as widgets.
   starting a second one (`.claude/launch.json` has an attach-only entry).
 - `npm test` / `npm run test:e2e` / `npm run check` (unit + build + e2e).
 - E2E caveat: the two tests polling `#master-level` / `#limiter-state`
-  (strood.spec.js ~955, ~1047) read a real AnalyserNode and flake when anything else
+  (in `strood.spec.js`; search for the ids) read a real AnalyserNode and flake when anything else
   on the machine holds audio. Re-run them in isolation before calling a regression.
 
 ## Module map
